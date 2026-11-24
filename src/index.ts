@@ -13,6 +13,7 @@ import { Container, getContainer } from "@cloudflare/containers";
 
 export interface Env {
   READER: DurableObjectNamespace<Reader>;
+  DEBUG_KV?: KVNamespace; // latest debug snapshot (frame + caption strip + OCR mask) and readings
   READER_SECRET: string;
   PUSH_URL: string;
   YT_CHANNEL: string;
@@ -198,6 +199,15 @@ export default {
         body = await req.json();
       } catch {
         return json({ error: "bad json" }, 400);
+      }
+      const snap = (body as { snapshot?: { t: number; jpeg: string } }).snapshot;
+      delete (body as { snapshot?: unknown }).snapshot;
+      if (snap && env.DEBUG_KV) {
+        const bytes = Uint8Array.from(atob(snap.jpeg), (c) => c.charCodeAt(0));
+        ctx.waitUntil(Promise.all([
+          env.DEBUG_KV.put("snapshot.jpg", bytes, { metadata: { t: snap.t, at: Date.now() } }),
+          env.DEBUG_KV.put("debug.json", JSON.stringify({ at: Date.now(), t: snap.t, video: body.video, debug: body.debug })),
+        ]));
       }
       return json(await reader.ingest(body), 200, { "cache-control": "no-store" });
     }

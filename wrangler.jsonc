@@ -24,6 +24,7 @@
       "max_instances": 1
     }
   ],
+  "kv_namespaces": [{ "binding": "DEBUG_KV", "id": "2ec4181106164f0d89c9d3310d8296ed" }],
   "durable_objects": { "bindings": [{ "name": "READER", "class_name": "Reader" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Reader"] }],
   "observability": { "enabled": true }

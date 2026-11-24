@@ -55,6 +55,9 @@ class Reader:
         self._sig = None
         self._sig_t = -1e9
         self._sig_obs = match.Observation("none")
+        self.last_frame = self.last_cap = None
+        self.last_t_frame = 0.0
+        self.snap_at = 0.0
         self.debug: dict = {"boot": BOOT, "readings": []}
 
     # ---- inputs -----------------------------------------------------------
@@ -71,6 +74,7 @@ class Reader:
 
     def read(self, t: float, frame) -> match.Observation:
         cap = caption.capture(frame, self.cfg.region, self.cfg.white)
+        self.last_frame, self.last_cap, self.last_t_frame = frame, cap, t
         if cap.ink < MIN_INK:
             obs, lines = match.Observation("none"), []
         elif caption.signature_distance(self._sig, cap.signature) < SAME_IMAGE and t - self._sig_t < MAX_REUSE:
@@ -177,6 +181,29 @@ class Reader:
                 "segments": self.tracker.json(),
             }
 
+    def snapshot_jpeg(self) -> bytes | None:
+        """Frame (scaled), caption strip and the mask OCR saw, stacked: for debugging only."""
+        import io
+        from PIL import Image
+
+        f, cap = self.last_frame, self.last_cap
+        if f is None or cap is None:
+            return None
+        W = 960
+        full = f.convert("RGB").resize((W, round(f.height * W / f.width)))
+        x, y, w, h = self.cfg.region
+        strip = f.convert("RGB").crop((round(x / 100 * f.width), round(y / 100 * f.height),
+                                       round((x + w) / 100 * f.width), round((y + h) / 100 * f.height)))
+        strip = strip.resize((W, round(strip.height * W / strip.width)))
+        mask = cap.image.convert("RGB").resize((W, round(cap.image.height * W / cap.image.width)))
+        out = Image.new("RGB", (W, full.height + strip.height + mask.height + 8), (255, 0, 0))
+        out.paste(full, (0, 0))
+        out.paste(strip, (0, full.height + 4))
+        out.paste(mask, (0, full.height + strip.height + 8))
+        b = io.BytesIO()
+        out.save(b, "JPEG", quality=70)
+        return b.getvalue()
+
     def push(self, force: bool = False) -> None:
         if not self.cfg.push_url or not (force or self.dirty or time.time() - self.pushed_at > HEARTBEAT):
             return
@@ -184,6 +211,15 @@ class Reader:
         body = self.snapshot()
         with self.lock:
             body["debug"] = {k: v for k, v in self.debug.items() if k != "readings"} | {"readings": self.debug["readings"][-6:]}
+        if time.time() - self.snap_at > 30:
+            try:
+                import base64
+                jpg = self.snapshot_jpeg()
+                if jpg:
+                    body["snapshot"] = {"t": round(self.last_t_frame, 1), "jpeg": base64.b64encode(jpg).decode()}
+                    self.snap_at = time.time()
+            except Exception as e:
+                self.note("snapshot_error", repr(e)[:200])
         try:
             r = hls.get(self.cfg.push_url, {"authorization": f"Bearer {self.cfg.secret}", "content-type": "application/json"},
                         timeout=15, data=json.dumps(body).encode(), method="POST")
