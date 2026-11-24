@@ -10,6 +10,34 @@
  * container exits by itself after OFFLINE_EXIT seconds without a stream.
  */
 import { Container, getContainer } from "@cloudflare/containers";
+import ICON_APPLE from "./icons/apple-touch-icon.png";
+import ICON_192 from "./icons/icon-192.png";
+import ICON_512 from "./icons/icon-512.png";
+import ICON_MASK from "./icons/icon-maskable-512.png";
+
+/* home-screen app: manifest + icons, served here so the main site needs no change */
+const ICONS: Record<string, ArrayBuffer> = {
+  "/icons/apple-touch-icon.png": ICON_APPLE,
+  "/icons/icon-192.png": ICON_192,
+  "/icons/icon-512.png": ICON_512,
+  "/icons/icon-maskable-512.png": ICON_MASK,
+};
+const MANIFEST = {
+  name: "skupština.app",
+  short_name: "Skupština",
+  description: "Prenos sednica Narodne skupštine uživo i svih 250 narodnih poslanika.",
+  lang: "sr-Latn",
+  start_url: "/",
+  scope: "/",
+  display: "standalone",
+  background_color: "#f5f5f2",
+  theme_color: "#f5f5f2",
+  icons: [
+    { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+    { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+    { src: "/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+  ],
+};
 
 export interface Env {
   READER: DurableObjectNamespace<Reader>;
@@ -251,6 +279,13 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     const reader = getContainer(env.READER, ID);
+
+    if (url.pathname === "/manifest.webmanifest")
+      return new Response(JSON.stringify(MANIFEST), {
+        headers: { "content-type": "application/manifest+json", "cache-control": "public, max-age=3600" },
+      });
+    if (ICONS[url.pathname])
+      return new Response(ICONS[url.pathname], { headers: { "content-type": "image/png", "cache-control": "public, max-age=604800" } });
 
     if (url.pathname === PATH && req.method === "POST") {
       if (!authorized(req, url, env.READER_SECRET)) return json({ error: "unauthorized" }, 401);
