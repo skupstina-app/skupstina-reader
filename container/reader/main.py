@@ -148,6 +148,7 @@ class Reader:
         new = [s for s in segs if s.seq > self.last_seq]
         if len(new) > 12:  # fell behind: skip ahead instead of lagging forever
             new = new[-BACKLOG:]
+        started = time.time()
         for s in new:
             data = hls.get(s.uri, self.stream.headers, timeout=30)
             # YouTube numbers live segments from the start of the broadcast, so seq * duration
@@ -156,7 +157,11 @@ class Reader:
             for t, frame in frames.segment_frames(data, t0, self.sampler):
                 self.feed(t, frame)
             self.last_seq = s.seq
-            self.debug.update(seq=s.seq, seg_duration=s.duration, stream_t=round(t0, 1))
+            self.debug.update(seq=s.seq, seg_duration=s.duration, stream_t=round(t0, 1),
+                              behind_s=round((segs[-1].seq - s.seq) * s.duration, 1))
+        if new:
+            # processing speed: 1.0 = exactly real time, below 1 = falling behind
+            self.debug["speed"] = round(sum(s.duration for s in new) / max(0.01, time.time() - started), 2)
         if ended:
             self.go_offline()
             return 10

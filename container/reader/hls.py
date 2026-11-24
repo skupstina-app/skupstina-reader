@@ -45,8 +45,8 @@ def _pick(formats: list[dict], max_height: int, want) -> dict | None:
     if not fs:
         return None
     under = [f for f in fs if f["height"] <= max_height]
-    # prefer H.264: cheapest to decode
-    key = lambda f: (f["height"], str(f.get("vcodec", "")).startswith("avc"))
+    # highest height, then <= 30 fps and H.264: cheapest to decode in real time
+    key = lambda f: (f["height"], (f.get("fps") or 30) <= 31, str(f.get("vcodec", "")).startswith("avc"))
     return max(under, key=key) if under else min(fs, key=lambda f: f["height"])
 
 
@@ -66,7 +66,7 @@ def resolve_live(channel: str, max_height: int, cookiefile: str | None = None, p
     f = _pick(info.get("formats") or [], max_height, lambda f: str(f.get("protocol", "")).startswith("m3u8"))
     if f is None:
         raise RuntimeError("live, but no HLS video format offered")
-    log.info("live %s at %sp", info["id"], f["height"])
+    log.info("live %s at %sp%s", info["id"], f["height"], f.get("fps") or "")
     return Stream(info["id"], f["url"], dict(f.get("http_headers") or {}), f["height"], True)
 
 

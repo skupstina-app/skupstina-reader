@@ -242,6 +242,7 @@ export default {
       video: s.timeline?.video ?? null, streamLive: s.timeline?.live ?? null, segments: s.timeline?.segments?.length ?? 0,
       lastPushAgoS: s.timeline ? Math.round((Date.now() - s.timeline.received) / 1000) : null,
       status: d.status, error: d.error, pushError: d.push_error, mpsError: d.mps_error, streamT: d.stream_t,
+      behindS: d.behind_s, speed: d.speed,
       last: Array.isArray(d.readings) ? d.readings.slice(-2) : undefined,
     }));
   },
