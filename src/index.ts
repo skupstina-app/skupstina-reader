@@ -130,9 +130,9 @@ export class Reader extends Container<Env> {
     const st = await this.getState();
     if (st.status === "running" || st.status === "healthy") return "running";
     // Unknown (YouTube's page can't be read from the Worker): start the container and let it check
-    // itself with yt-dlp; after it exits for lack of a stream, wait 10 minutes before trying again.
+    // itself with yt-dlp; after it exits for lack of a stream, wait 5 minutes before trying again.
     const lastStop = (await this.ctx.storage.get<Note>("lastStop"))?.at ?? 0;
-    if (live === true || (live === null && Date.now() - lastStop > 10 * 60_000)) {
+    if (live === true || (live === null && Date.now() - lastStop > 5 * 60_000)) {
       await this.ctx.storage.put("lastStart", { at: Date.now(), live });
       await this.startAndWaitForPorts();
       return "started";
