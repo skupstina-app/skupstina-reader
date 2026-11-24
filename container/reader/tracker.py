@@ -10,6 +10,8 @@ Rules (after Neleceni's state machine):
 - a non-MP speaker (minister, guest) closes the current MP segment without opening one;
 - the speech timer (top right, read with the name) says how long they have been speaking: two readings
   that agree move the segment's start back to when they really began, even before the camera found them;
+- the previous speech ends `pre_gap` seconds before the next one begins (when nothing ended it earlier),
+  so the chair calling the next speaker is never muted along with the previous one;
 - sound ends a speech: the microphone cut (digital silence) for `end_silent` seconds, or no voice (only
   room noise) for `end_quiet` seconds. A cut speaker read again with a timer that still counts from the
   same start (the chair let them go on) gets their segment back instead of a new one;
@@ -51,6 +53,8 @@ class Tracker:
     window: float = 12.0  # readings of a new name count together only this long after the last one
     end_silent: float = 0.5  # microphone cut this long: the speech is over
     end_quiet: float = 5.0  # no voice (room noise only) this long: the speech is over
+    pre_gap: float = 7.0  # the previous speech ends this long before the next begins: the chair calls the
+                          # next speaker in between, and that should be heard even if the previous one is muted
     max_speech: float = 1800.0
     keep: int = 600
     video: str | None = None
@@ -144,8 +148,11 @@ class Tracker:
         if start >= seg.start - 0.5:
             return False
         i = self.segments.index(seg)
-        if i > 0 and (self.segments[i - 1].end is None or self.segments[i - 1].end > start):
-            self.segments[i - 1].end = start
+        if i > 0:
+            prev = self.segments[i - 1]
+            gap_end = max(prev.start, start - self.pre_gap)
+            if not prev.closed and (prev.end is None or prev.end > gap_end):
+                prev.end = gap_end
         seg.start = start
         return True
 
@@ -214,7 +221,7 @@ class Tracker:
     def _switch(self, t: float, ident: tuple) -> None:
         cur = self.open
         if cur is not None:
-            cur.end = max(cur.start, t)
+            cur.end = max(cur.start, t - self.pre_gap)
         self.current = ident
         if ident[0] == "mp":
             self.segments.append(Segment(t, None, ident[1]))

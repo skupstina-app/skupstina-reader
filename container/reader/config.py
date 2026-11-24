@@ -40,6 +40,7 @@ class Config:
     silent_db: float
     end_silent: float
     end_quiet: float
+    pre_gap: float
     offline_exit: float
     cookies: str | None
     proxy: str | None
@@ -77,7 +78,8 @@ class Config:
             voice_margin=_f("VOICE_MARGIN", 10),
             silent_db=_f("SILENT_DB", -70),  # quieter than this (dBFS): the microphone is cut, not just a pause
             end_silent=_f("END_SILENT", 0.5),  # seconds of cut microphone that end a speech
-            end_quiet=_f("END_QUIET", 5),  # seconds with no voice (room noise only) that end a speech  # then: this many dB above the room's background level
+            end_quiet=_f("END_QUIET", 5),
+            pre_gap=_f("PRE_GAP", 7),  # seconds before a speech left to the chair (never muted)  # seconds with no voice (room noise only) that end a speech  # then: this many dB above the room's background level
             offline_exit=_f("OFFLINE_EXIT", 900),
             cookies=cookies,
             proxy=e("YTDLP_PROXY") or None,

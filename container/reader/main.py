@@ -72,7 +72,7 @@ class Reader:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.lock = threading.Lock()
-        self.tracker = Tracker(confirm=cfg.confirm, max_speech=cfg.max_speech, end_silent=cfg.end_silent, end_quiet=cfg.end_quiet)
+        self.tracker = Tracker(confirm=cfg.confirm, max_speech=cfg.max_speech, end_silent=cfg.end_silent, end_quiet=cfg.end_quiet, pre_gap=cfg.pre_gap)
         self.live_pass = Pass(self.tracker, cfg.interval)
         self.sampler = self.live_pass.sampler
         self.backfill: "Backfill | None" = None
@@ -497,7 +497,7 @@ class Chunk:
         self.bf, self.seq, self.end_seq = bf, start_seq, end_seq
         self.start_t = start_seq * bf.dur + r.cfg.time_offset
         self.end_t = end_seq * bf.dur + r.cfg.time_offset
-        self.tracker = Tracker(confirm=r.cfg.confirm, max_speech=r.cfg.max_speech, end_silent=r.cfg.end_silent, end_quiet=r.cfg.end_quiet)
+        self.tracker = Tracker(confirm=r.cfg.confirm, max_speech=r.cfg.max_speech, end_silent=r.cfg.end_silent, end_quiet=r.cfg.end_quiet, pre_gap=r.cfg.pre_gap)
         self.ps = Pass(self.tracker, r.cfg.interval)
         self.last_t = self.start_t
         self.done = False

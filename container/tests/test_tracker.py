@@ -34,14 +34,14 @@ def test_none_readings_do_not_break_or_end():
 
 
 def test_switch_closes_previous_at_first_read_of_new():
-    tr = Tracker()
+    tr = Tracker(pre_gap=0)
     feed(tr, 0, [MP(1)] * 3)
     feed(tr, 60, [MP(2), MP(1), MP(2), MP(2), MP(2)])  # a stray read resets the count
     assert plain(tr.json()) == [{"from": 0.0, "to": 63.0, "mp": 1}, {"from": 63.0, "to": None, "mp": 2}]
 
 
 def test_non_mp_speaker_closes_segment():
-    tr = Tracker()
+    tr = Tracker(pre_gap=0)
     feed(tr, 0, [MP(1)] * 3)
     feed(tr, 30, [OTHER("Милош Вучевић"), OTHER("Милош Вучеви"), OTHER("Милош Вучевић")])
     assert plain(tr.json()) == [{"from": 0.0, "to": 30.0, "mp": 1}]
@@ -71,7 +71,7 @@ def test_restore_only_same_stream_when_empty():
 
 
 def test_stray_other_name_does_not_reset_new_speaker():
-    tr = Tracker()
+    tr = Tracker(pre_gap=0)
     feed(tr, 0, [MP(1)] * 3)
     feed(tr, 60, [MP(2), MP(7), MP(2), NONE, MP(2)])  # one misread as someone else in the middle
     assert plain(tr.json()) == [{"from": 0.0, "to": 60.0, "mp": 1}, {"from": 60.0, "to": None, "mp": 2}]
@@ -95,7 +95,8 @@ def test_timer_moves_start_back_to_when_they_began():
     # camera finds MP 2 at t=100, their timer already shows 0:30
     for k, t in enumerate([100.0, 101.0, 102.0]):
         tr.observe(t, MPT(2, 30 + k))
-    assert plain(tr.json()) == [{"from": 0.0, "to": 70.0, "mp": 1}, {"from": 70.0, "to": None, "mp": 2}]
+    # MP 2 began at 70; MP 1 ends 7 s before, so the chair calling MP 2 is heard
+    assert plain(tr.json()) == [{"from": 0.0, "to": 63.0, "mp": 1}, {"from": 70.0, "to": None, "mp": 2}]
 
 
 def test_one_odd_timer_reading_is_not_enough():
@@ -113,7 +114,7 @@ def test_timer_read_later_still_moves_the_start():
     feed(tr, 100, [MP(2)] * 3)  # no timer while confirming
     tr.observe(110, MPT(2, 50))
     tr.observe(111, MPT(2, 51))
-    assert plain(tr.json()) == [{"from": 0.0, "to": 60.0, "mp": 1}, {"from": 60.0, "to": None, "mp": 2}]
+    assert plain(tr.json()) == [{"from": 0.0, "to": 53.0, "mp": 1}, {"from": 60.0, "to": None, "mp": 2}]
     assert not tr.wants_timer(2)  # pinned down: stop reading it
 
 
@@ -184,3 +185,10 @@ def test_timer_before_the_cut_is_clamped_to_the_cut():
     for t in (40.0, 41.0, 42.0):
         tr.observe(t, MPT(2, int(t - 10)))  # timer says they began at 10, but MP 1 spoke until 20
     assert plain(tr.json())[-1] == {"from": 20.0, "to": None, "mp": 2}
+
+
+def test_gap_before_new_speaker_without_timer():
+    tr = Tracker()
+    feed(tr, 0, [MP(1)] * 3)
+    feed(tr, 100, [MP(2)] * 3)
+    assert plain(tr.json()) == [{"from": 0.0, "to": 93.0, "mp": 1}, {"from": 100.0, "to": None, "mp": 2}]
