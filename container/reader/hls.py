@@ -74,13 +74,26 @@ def latest_recording(channel: str, cookiefile: str | None = None, proxy: str | N
     """URL of the channel's most recent finished live stream (for replay tests)."""
     import yt_dlp
 
-    opts = _ydl_opts(cookiefile, proxy) | {"extract_flat": True, "playlistend": 10, "noplaylist": False}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(f"https://www.youtube.com/channel/{channel}/streams", download=False)
-    for e in info.get("entries") or []:
-        if e.get("live_status") not in ("is_live", "is_upcoming") and e.get("id"):
-            return f"https://www.youtube.com/watch?v={e['id']}"
-    raise RuntimeError("no finished stream found on the channel")
+    opts = _ydl_opts(cookiefile, proxy) | {"extract_flat": "in_playlist", "playlistend": 15, "noplaylist": False}
+
+    def flat(entries):
+        for e in entries or []:
+            if e.get("_type") == "playlist" or e.get("entries"):
+                yield from flat(e.get("entries"))
+            else:
+                yield e
+
+    seen = []
+    for tab in ("streams", "videos"):
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/channel/{channel}/{tab}", download=False)
+        for e in flat(info.get("entries")):
+            seen.append((tab, e.get("id"), e.get("live_status"), (e.get("title") or "")[:60]))
+            dur = e.get("duration") or 0
+            if e.get("id") and e.get("live_status") not in ("is_live", "is_upcoming") and (dur == 0 or dur > 1800):
+                log.info("latest recording: %s %s", e["id"], e.get("title"))
+                return f"https://www.youtube.com/watch?v={e['id']}"
+    raise RuntimeError(f"no finished stream found on the channel; saw {seen[:10]}")
 
 
 def resolve_recording(url: str, max_height: int, cookiefile: str | None = None, proxy: str | None = None, channel: str = "") -> Stream:

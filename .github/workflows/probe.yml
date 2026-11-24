@@ -39,6 +39,7 @@ jobs:
         env:
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: |
+          set -o pipefail
           docker run --rm -e YT_COOKIES -e SOURCE_URL="${{ inputs.url }}" -e START="${{ inputs.start }}" \
             -e DURATION="${{ inputs.duration }}" reader | tee out.txt
           tail -1 out.txt | jq -c '{video, height, frames, seconds, n: (.segments|length)}' | sed 's/^/::notice title=replay::/'
@@ -48,6 +49,7 @@ jobs:
         env:
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: |
+          set -o pipefail
           docker run -d --name r -p 8080:8080 -e YT_COOKIES -e OFFLINE_EXIT=99999 reader
           for i in $(seq 1 $(( ${{ inputs.duration }} / 30 ))); do
             sleep 30
