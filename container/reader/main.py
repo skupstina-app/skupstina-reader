@@ -473,7 +473,7 @@ class Reader:
 BF_SQ = re.compile(r"/sq/(\d+)/")
 
 
-BF_VERSION = 3  # bump to rescan history with new detection rules (2: break screen + talk time, 3: audio-only playlist)
+BF_VERSION = 4  # bump to rescan history with new detection rules (2: break screen + talk time, 3: audio-only playlist, 4: stricter name matching)
 
 
 class Chunk:

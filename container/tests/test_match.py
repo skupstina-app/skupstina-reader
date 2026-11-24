@@ -96,3 +96,20 @@ def test_garbled_current_speaker_is_not_someone_else():
     assert classify([line("Милан Рајан", 60, 70)], MPS, 35, current=1050).kind == "none"
     assert classify([line("Милан Рајан", 60, 70)], MPS, 35).kind == "other"  # without context it's just a name
     assert classify([line("Милош Вучевић", 60, 80)], MPS, 35, current=1050).kind == "other"  # a real change still counts
+
+
+def test_first_name_inside_another_first_name_is_not_enough():
+    # live 24 Nov 2026: Маријан Ристичевић's caption was shown as Марија Маруна
+    idx = build_index([{"id": 598, "l": "Marijan Rističević", "c": "Маријан Ристичевић"},
+                       {"id": 1491, "l": "Marija Maruna", "c": "Марија Маруна"}])
+    k = lambda t: (lambda o: (o.kind, o.mp))(classify([line(t, 18), line("Александар Вучић - Србија побеђује", 82)], idx, 35))
+    assert k("Маријан Ристичевић") == ("mp", 598)
+    assert k("Маријан Ристичев") == ("mp", 598)      # cut-off surname: still him
+    assert k("Маријан Ри")[1] != 1491                 # too little of the surname: never Maruna
+    assert k("Марија Маруна") == ("mp", 1491)
+
+
+def test_one_word_cannot_be_both_first_name_and_surname():
+    idx = build_index([{"id": 1491, "l": "Marija Maruna", "c": "Марија Маруна"},
+                       {"id": 7, "l": "Marina Raguš", "c": "Марина Рагуш"}])
+    assert (lambda o: (o.kind, o.mp))(classify([line("Марина Рагуш", 18)], idx, 35)) == ("mp", 7)

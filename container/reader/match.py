@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from itertools import product
 
 _CYR = {
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "ђ": "dj", "е": "e", "ж": "z", "з": "z", "и": "i",
@@ -59,30 +60,44 @@ def allowed_errors(n: int) -> int:
 
 
 def line_matches_name(line: str, name: str) -> bool:
-    """Every word of the name is found in the line; at least one whole (see Neleceni docs)."""
+    """True when `line` shows `name`.
+
+    Each part of the name must be its own word of the line (a different word for each part), read whole with a
+    few OCR errors allowed, or as a clear piece of it ("А екса · р Вучић"); a long first name may be badly
+    garbled ("АпењСандар Вучић"), but the surname must really be read. Two parts glued into one word
+    ("АлександарВучић") count for both. At least one part must be read whole.
+    """
     tokens = [t for t in normalize(name).split(" ") if t]
-    if not tokens:
-        return False
     words = [w for w in normalize(line).split(" ") if w]
-    compact = "".join(words)
-    if not compact:
+    if not tokens or not words:
         return False
-
-    def whole(t: str) -> bool:
-        return substring_distance(compact, t) <= allowed_errors(len(t))
-
-    def piece(t: str) -> bool:
-        return any(
-            len(w) >= max(3, -(-len(t) * 4 // 10)) and len(w) < len(t)
-            and substring_distance(t, w) <= (2 if len(w) >= 6 else allowed_errors(len(w)))
-            for w in words
-        )
-
-    def loose(t: str) -> bool:
-        return len(t) >= 6 and substring_distance(compact, t) <= (len(t) * 4) // 10
-
-    found = [whole(t) for t in tokens]
-    return any(found) and all(found[i] or piece(t) or loose(t) for i, t in enumerate(tokens))
+    last = len(tokens) - 1
+    pairs = list(zip(tokens, tokens[1:]))
+    options: list[list] = []
+    wholes: list[set] = []
+    for i, t in enumerate(tokens):
+        whole: set = set()
+        other: set = set()
+        for j, w in enumerate(words):
+            if levenshtein(w, t) <= allowed_errors(len(t)):
+                whole.add(j)
+            elif (len(w) >= max(3, -(-len(t) * 4 // 10)) and len(w) < len(t)
+                  and substring_distance(t, w) <= (2 if len(w) >= 6 else allowed_errors(len(w)))):
+                other.add(j)  # a clear piece of the word
+            elif i != last and len(t) >= 6 and levenshtein(w, t) <= (len(t) * 4) // 10:
+                other.add(j)  # a long first name read badly
+            for a, b in pairs:
+                if t in (a, b) and levenshtein(w, a + b) <= allowed_errors(len(a + b)):
+                    whole.add(("glued", j))
+        if not whole and not other:
+            return False
+        options.append(sorted(whole | other, key=str))
+        wholes.append(whole)
+    for combo in product(*options):
+        plain = [c for c in combo if not isinstance(c, tuple)]
+        if len(plain) == len(set(plain)) and any(c in wholes[i] for i, c in enumerate(combo)):
+            return True
+    return False
 
 
 @dataclass
@@ -240,15 +255,16 @@ def classify(lines: list[OcrLine], index: list[MP], min_confidence: float = 35, 
     if line is None:
         return Observation("none")
     hits = [mp for mp in index if any(line_matches_name(line.text, n) for n in mp.keys)]
-    # A name followed by more words is a group line whose dash OCR lost ("Александар Вучић
-    # Србија"): it tells us nothing about who is speaking.
-    if any(has_words_after_name(line.text, n) for mp in hits for n in mp.keys):
-        return Observation("none")
     if hits:
-        scored = sorted((_distance(line.text, mp), mp.id) for mp in hits)
-        if len(scored) == 1 or scored[0][0] < scored[1][0]:
-            return Observation("mp", scored[0][1], clean_line(line.text))
-        return Observation("none")  # two MPs fit equally well: don't guess
+        scored = sorted(((_distance(line.text, mp), mp.id, mp) for mp in hits), key=lambda x: (x[0], x[1]))
+        if len(scored) > 1 and scored[0][0] == scored[1][0]:
+            return Observation("none")  # two MPs fit equally well: don't guess
+        best = scored[0][2]
+        # The best name followed by more words is a group line whose dash OCR lost ("Александар Вучић
+        # Србија"): it tells us nothing about who is speaking.
+        if any(has_words_after_name(line.text, n) for n in best.keys):
+            return Observation("none")
+        return Observation("mp", best.id, clean_line(line.text))
     # A garbled reading of the current speaker's name ("Хиоса ћр ву Вучић") must not count as
     # someone else, or it could end their segment while they are still speaking.
     if current is not None and any(mentions_surname(line.text, k) or similar_lines(line.text, k)
