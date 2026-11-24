@@ -41,7 +41,7 @@ def test_history_is_cut_where_live_has_its_first_speaker():
     c.last_t, c.done = 500, True
     feed(r.tracker, 520, 3)
     assert plain(r.merged()) == [
-        {"from": 100.0, "to": 300.0, "mp": 1},
+        {"from": 100.0, "to": 293.0, "mp": 1},  # 7 s left to the chair before MP 2
         {"from": 300.0, "to": 520.0, "mp": 2},
         {"from": 520.0, "to": None, "mp": 3},
     ]
