@@ -60,3 +60,18 @@ def test_unfinished_backfill_stops_at_what_it_has_read():
     b.last_t = 160
     feed(r.tracker, 520, 3)
     assert r.merged()[0] == {"from": 100.0, "to": 160.0, "mp": 1}
+
+
+def test_restored_history_fills_until_backfill_reaches_it():
+    r = reader()
+    r.restored = [{"from": 441.0, "to": 19041.0, "mp": 1029}, {"from": 19041.0, "to": None, "mp": 1190}]
+    b = bf_for(r, end_seq=4000)  # backfill will cover 0..20000 s
+    feed(b.tracker, 441, 1029)
+    b.last_t = 1400
+    feed(r.tracker, 19500, 7)  # live pass joined later and found someone
+    got = r.merged()
+    # backfill so far, then restored history it hasn't reached, then live
+    assert got[0] == {"from": 441.0, "to": 1400.0, "mp": 1029}
+    assert {"from": 19041.0, "to": 19500.0, "mp": 1190} in got
+    assert got[-1] == {"from": 19500.0, "to": None, "mp": 7}
+    assert all(sg["from"] != 441.0 or sg["to"] != 19041.0 for sg in got)  # the stale stretched segment is gone

@@ -55,6 +55,7 @@ class Reader:
         self.live_pass = Pass(self.tracker, cfg.interval)
         self.sampler = self.live_pass.sampler
         self.backfill: "Backfill | None" = None
+        self.restored: list[dict] = []
         self.index: list[match.MP] = []
         self.mps_at = 0.0
         self.stream: hls.Stream | None = None
@@ -144,6 +145,7 @@ class Reader:
                         self.backfill.stop = True
                         self.backfill = None
                     self.tracker.reset(s.video)
+                    self.restored = []
                     self.last_seq = self.last_t = None
                     self.restore_tried = False
                     self.dirty = True
@@ -199,12 +201,24 @@ class Reader:
         threading.Thread(target=self.backfill.run, daemon=True).start()
 
     def merged(self) -> list[dict]:
-        """Backfilled history before the live pass, cut where the live pass has its first speaker."""
+        """History, then the live pass. History is what the backfill has re-read so far, then whatever was
+        restored from before a restart for the stretch the backfill hasn't reached yet."""
         live = self.tracker.json()
         bf = self.backfill
-        if bf is None or bf.video != self.tracker.video or not bf.tracker.segments:
-            return live
-        cut = live[0]["from"] if live else bf.end_t
+        if bf is not None and bf.video != self.tracker.video:
+            bf = None
+        live_cut = live[0]["from"] if live else float("inf")
+        bf_reach = (bf.end_t if bf.done else bf.last_t) if bf else -1.0
+        old = []
+        for sg in self.restored:
+            if sg["from"] < bf_reach or sg["from"] >= live_cut:
+                continue
+            if sg["to"] is None or sg["to"] > live_cut:
+                sg = dict(sg, to=None if live_cut == float("inf") else live_cut)
+            old.append(sg)
+        if bf is None or not bf.tracker.segments:
+            return old + live
+        cut = min(live_cut, old[0]["from"]) if old else (live[0]["from"] if live else bf.end_t)
         out = []
         for sg in bf.tracker.json():
             if sg["from"] >= cut:
@@ -218,7 +232,7 @@ class Reader:
                 else:
                     sg = dict(sg, to=None if self.tracker.current is None else cut)
             out.append(sg)
-        return out + live
+        return out + old + live
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -280,14 +294,16 @@ class Reader:
             self.note("push_error", repr(e)[:300])
 
     def maybe_restore(self, resp: dict) -> None:
-        """After a restart the Worker sends back what it had for this stream."""
+        """After a restart the Worker sends back what it had for this stream; it fills history until the
+        backfill has re-read that stretch."""
         prev = resp.get("previous")
         if self.restore_tried or not prev:
             return
         self.restore_tried = True
         with self.lock:
-            if self.tracker.restore(prev.get("video"), prev.get("segments") or []):
-                log.info("restored %d segments", len(self.tracker.segments))
+            if prev.get("video") and prev.get("video") == self.tracker.video and not self.restored:
+                self.restored = [dict(sg) for sg in prev.get("segments") or []]
+                log.info("restored %d segments", len(self.restored))
                 self.dirty = True
 
     def run(self) -> None:
