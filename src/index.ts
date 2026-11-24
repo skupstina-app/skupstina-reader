@@ -34,7 +34,7 @@ export interface Env {
   OFFLINE_EXIT?: string;
 }
 
-type Seg = { from: number; to: number | null; mp: number };
+type Seg = { from: number; to: number | null; mp: number; talk?: number | null }; // talk: seconds with voice (null: no audio)
 type Timeline = {
   boot: string;
   video: string | null;
@@ -43,6 +43,7 @@ type Timeline = {
   received: number;
   segments: Seg[];
   bfReach?: number; // stream second the backfill (history before joining) has read up to
+  bfVersion?: number; // detection rules the history was read with; a new version rescans
   debug?: string; // JSON from the container, kept as text
 };
 type Note = { at: number; live?: boolean | null; error?: string };
@@ -84,7 +85,7 @@ export class Reader extends Container<Env> {
     return this.ctx.storage.put("lastError", { at: Date.now(), error: String(error) });
   }
 
-  async ingest(body: Omit<Timeline, "debug" | "received"> & { debug?: unknown }): Promise<{ ok: true; previous?: { video: string; segments: Seg[]; bfReach: number } }> {
+  async ingest(body: Omit<Timeline, "debug" | "received"> & { debug?: unknown }): Promise<{ ok: true; previous?: { video: string; segments: Seg[]; bfReach: number; bfVersion: number } }> {
     const prev = await this.ctx.storage.get<Timeline>("tl");
     const next: Timeline = {
       boot: String(body.boot ?? ""),
@@ -93,13 +94,15 @@ export class Reader extends Container<Env> {
       updated: Number(body.updated) || Date.now(),
       received: Date.now(),
       segments: sanitize(body.segments),
-      bfReach: Math.max(Number(body.bfReach) || 0, prev && prev.video === body.video ? prev.bfReach ?? 0 : 0),
+      bfVersion: Number(body.bfVersion) || 1,
+      bfReach: Math.max(Number(body.bfReach) || 0,
+        prev && prev.video === body.video && (prev.bfVersion ?? 1) === (Number(body.bfVersion) || 1) ? prev.bfReach ?? 0 : 0),
       debug: body.debug === undefined ? undefined : JSON.stringify(body.debug).slice(0, 20_000),
     };
     // A restarted container (new boot id) on the same stream gets the old timeline back.
-    let previous: { video: string; segments: Seg[]; bfReach: number } | undefined;
+    let previous: { video: string; segments: Seg[]; bfReach: number; bfVersion: number } | undefined;
     if (prev && prev.boot !== next.boot && prev.video && prev.video === next.video && prev.segments.length) {
-      previous = { video: prev.video, segments: prev.segments, bfReach: prev.bfReach ?? 0 };
+      previous = { video: prev.video, segments: prev.segments, bfReach: prev.bfReach ?? 0, bfVersion: prev.bfVersion ?? 1 };
       if (!next.segments.length) next.segments = prev.segments;
     }
     // Stream ended without a new one yet: keep the last stream's timeline for late viewers.
@@ -123,7 +126,7 @@ export class Reader extends Container<Env> {
     const now = new Map(after.map((s) => [key(s), s]));
     const changed = after.filter((s) => {
       const o = old.get(key(s));
-      return !o || o.to !== s.to || o.mp !== s.mp;
+      return !o || o.to !== s.to || o.mp !== s.mp || (o.talk ?? null) !== (s.talk ?? null);
     });
     const gone = before.filter((s) => !now.has(key(s)));
     if (!changed.length && !gone.length && this.tableReady) return;
@@ -133,13 +136,14 @@ export class Reader extends Container<Env> {
           db.prepare("CREATE TABLE IF NOT EXISTS speech_segments(video TEXT NOT NULL, start_s REAL NOT NULL, end_s REAL, mp INTEGER NOT NULL, updated_at INTEGER, PRIMARY KEY(video, start_s))"),
           db.prepare("CREATE INDEX IF NOT EXISTS speech_segments_mp ON speech_segments(mp)"),
         ]);
+        await db.prepare("ALTER TABLE speech_segments ADD COLUMN talk_s REAL").run().catch(() => {}); // seconds with voice
         this.tableReady = true;
         // first write for this object: make sure everything we hold is stored
         changed.splice(0, changed.length, ...after);
       }
       const t = Date.now();
       const stmts = [
-        ...changed.map((s) => db.prepare("INSERT INTO speech_segments(video,start_s,end_s,mp,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(video,start_s) DO UPDATE SET end_s=excluded.end_s, mp=excluded.mp, updated_at=excluded.updated_at").bind(video, s.from, s.to, s.mp, t)),
+        ...changed.map((s) => db.prepare("INSERT INTO speech_segments(video,start_s,end_s,mp,talk_s,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(video,start_s) DO UPDATE SET end_s=excluded.end_s, mp=excluded.mp, talk_s=excluded.talk_s, updated_at=excluded.updated_at").bind(video, s.from, s.to, s.mp, s.talk ?? null, t)),
         ...gone.map((s) => db.prepare("DELETE FROM speech_segments WHERE video=? AND start_s=?").bind(video, s.from)),
       ];
       for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
@@ -202,7 +206,9 @@ function sanitize(x: unknown): Seg[] {
   for (const s of x.slice(-1000)) {
     const from = Number(s?.from), mp = Number(s?.mp);
     const to = s?.to == null ? null : Number(s.to);
-    if (Number.isFinite(from) && Number.isInteger(mp) && (to === null || Number.isFinite(to))) out.push({ from, to, mp });
+    const talk = s?.talk == null ? null : Number(s.talk);
+    if (Number.isFinite(from) && Number.isInteger(mp) && (to === null || Number.isFinite(to)))
+      out.push({ from, to, mp, talk: talk !== null && Number.isFinite(talk) ? talk : null });
   }
   return out;
 }
@@ -280,7 +286,7 @@ export default {
       const tl = await reader.timeline();
       const fresh = !!tl && Date.now() - tl.received < STALE_MS;
       const body = {
-        segments: tl?.segments ?? [],
+        segments: (tl?.segments ?? []).map((s) => ({ from: s.from, to: s.to, mp: s.mp })),
         video: tl?.video ?? null,
         live: fresh && !!tl?.live,
         updated: tl?.updated ?? null,

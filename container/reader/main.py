@@ -36,6 +36,19 @@ SAME_IMAGE = 0.01
 MAX_REUSE = 5.0  # seconds a reading may be reused for an unchanged crop
 
 
+VOICE_HISTORY = 1800  # loudness windows kept per pass (0.5 s each: 15 minutes)
+
+
+def voice_threshold(history: list[float], fallback: float, margin: float) -> float:
+    """dBFS above which a 0.5 s window counts as someone talking. Adapts to the stream: the room's background
+    level (quietest 5 % of the last 15 minutes) plus a margin, never stricter than -35 dBFS or looser than -60."""
+    if len(history) < 60:  # under 30 s of audio: not enough to know the room yet
+        return fallback
+    q = sorted(history)
+    floor = q[int(0.05 * (len(q) - 1))]
+    return min(-35.0, max(-60.0, floor + margin))
+
+
 class Pass:
     """State of one pass over the video: live, or the backfill of what aired before we joined."""
 
@@ -46,6 +59,8 @@ class Pass:
         self.sig_t = -1e9
         self.sig_obs = match.Observation("none")
         self.n_frames = self.n_ocr = 0
+        self.db: list[float] = []  # recent loudness windows (dBFS), to find the room's background level
+        self.threshold = 0.0
         self.kinds: dict = {}
         self.last_none: dict | None = None
         self.snap_at = 0.0
@@ -94,6 +109,10 @@ class Reader:
 
     def read(self, t: float, frame, ps: "Pass | None" = None) -> match.Observation:
         ps = ps or self.live_pass
+        if frames.is_break(frame):
+            ps.n_frames += 1
+            ps.kinds["break"] = ps.kinds.get("break", 0) + 1
+            return match.Observation("break")
         cap = caption.capture(frame, self.cfg.region, self.cfg.white)
         ps.n_frames += 1
         if ps is self.live_pass:
@@ -120,6 +139,38 @@ class Reader:
                       "ocr": [f"{l.confidence:.0f}% {l.text}" for l in lines][:4]})
             del r[:-20]
         return obs
+
+    def run_segment(self, data: bytes, t0: float, ps: "Pass", chunk: "Chunk | None" = None) -> None:
+        """Frames and audio of one media segment, in time order, into a pass's tracker."""
+        windows = frames.segment_audio(data, t0)
+        for _, _, db in windows:
+            ps.db.append(db)
+        del ps.db[:-VOICE_HISTORY]
+        threshold = voice_threshold(ps.db, self.cfg.voice_db, self.cfg.voice_margin)
+        ps.threshold = threshold
+        i = 0
+
+        def audio_until(limit: float) -> None:
+            nonlocal i
+            with self.lock:
+                while i < len(windows) and windows[i][0] < limit:
+                    w0, dt, db = windows[i]
+                    ps.tracker.audio(w0, dt, db > threshold)
+                    i += 1
+
+        for t, frame in frames.segment_frames(data, t0, ps.sampler):
+            audio_until(t)
+            obs = self.read(t, frame, ps)
+            with self.lock:
+                if ps.tracker.observe(t, obs):
+                    self.dirty = True
+                    if ps is self.live_pass:
+                        log.info("t=%.1f now: %s", t, ps.tracker.current)
+                if ps is self.live_pass:
+                    self.last_t = t
+                elif chunk is not None:
+                    chunk.last_t = t
+        audio_until(float("inf"))
 
     def feed(self, t: float, frame) -> None:
         obs = self.read(t, frame)
@@ -194,9 +245,12 @@ class Reader:
             # YouTube numbers live segments from the start of the broadcast, so seq * duration
             # is the position the embedded player reports with getCurrentTime().
             t0 = s.seq * s.duration + self.cfg.time_offset
-            for t, frame in frames.segment_frames(data, t0, self.sampler):
-                self.feed(t, frame)
+            self.run_segment(data, t0, self.live_pass)
             self.last_seq = s.seq
+            if self.live_pass.db:
+                q = sorted(self.live_pass.db)
+                self.debug["audio_db"] = {**{f"p{p}": round(q[int(p / 100 * (len(q) - 1))], 1) for p in (5, 50, 90)},
+                                          "threshold": round(self.live_pass.threshold, 1)}
             self.debug.update(seq=s.seq, seg_duration=s.duration, stream_t=round(t0, 1),
                               behind_s=round((segs[-1].seq - s.seq) * s.duration, 1))
         if new:
@@ -217,48 +271,50 @@ class Reader:
             self.note("backfill_error", "segment URLs have no /sq/N/: can't rewind")
             return
         start = int(max(0.0, self.bf_resume_t - self.cfg.time_offset) // (latest.duration or 5.0))
-        self.backfill = Backfill(self, self.tracker.video, latest, end_seq, start)
+        self.backfill = Backfill(self, self.tracker.video, latest, end_seq, start, self.cfg.backfill_workers)
         if start:
             log.info("backfill resumes at %.0f s", start * (latest.duration or 5.0))
         threading.Thread(target=self.backfill.run, daemon=True).start()
 
     def merged(self) -> list[dict]:
-        """History, then the live pass. History is what the backfill has re-read so far, then whatever was
-        restored from before a restart for the stretch the backfill hasn't reached yet."""
+        """History, then the live pass. History is what the backfill has (re-)read, plus whatever was restored
+        from before a restart on the stretches the backfill hasn't covered yet."""
         live = self.tracker.json()
         bf = self.backfill
         if bf is not None and bf.video != self.tracker.video:
             bf = None
         live_cut = live[0]["from"] if live else float("inf")
-        bf_from = bf.start_t if bf else 0.0
-        bf_reach = (bf.end_t if bf.done else bf.last_t) if bf else -1.0
+        covered = bf.covered() if bf else []
+        hist = bf.json() if bf else []
         old = []
         for sg in self.restored:
-            if bf_from <= sg["from"] < bf_reach or sg["from"] >= live_cut:
+            if sg["from"] >= live_cut or any(a <= sg["from"] < b for a, b in covered):
                 continue
-            if bf and sg["from"] < bf_from and (sg["to"] is None or sg["to"] > bf_from) and bf.tracker.segments:
-                sg = dict(sg, to=min(bf.tracker.segments[0].start, live_cut))  # runs until the backfill's first speaker
-            if sg["to"] is None or sg["to"] > live_cut:
-                sg = dict(sg, to=None if live_cut == float("inf") else live_cut)
+            sg = dict(sg)
+            # stop it at the next thing the backfill knows about
+            nxt = [h["from"] for h in hist if h["from"] > sg["from"]] + ([live_cut] if live else [])
+            if nxt and (sg["to"] is None or sg["to"] > min(nxt)):
+                sg["to"] = min(nxt)
             old.append(sg)
-        if bf is None or not bf.tracker.segments:
-            return old + live
-        later_old = [sg for sg in old if sg["from"] >= bf_reach]
-        cut = min(live_cut, later_old[0]["from"]) if later_old else (live[0]["from"] if live else bf.end_t)
-        out = []
-        for sg in bf.tracker.json():
-            if sg["from"] >= cut:
-                break
-            if sg["to"] is None or sg["to"] > cut:
-                # still open where the backfill stopped: runs on into the live pass unless that has a speaker
-                if not bf.done:
-                    sg = dict(sg, to=round(min(bf.last_t, cut), 1))  # only as far as the backfill has read
-                elif live:
-                    sg = dict(sg, to=cut)
-                else:
-                    sg = dict(sg, to=None if self.tracker.current is None else cut)
-            out.append(sg)
-        return sorted(out + old, key=lambda x: x["from"]) + live
+        if bf is not None and hist:
+            later = [x["from"] for x in old if x["from"] >= bf.last_t]
+            cut = min([live_cut] + later)
+            if cut == float("inf"):
+                cut = bf.end_t
+            out = []
+            for sg in hist:
+                if sg["from"] >= cut:
+                    break
+                if sg["to"] is None or sg["to"] > cut:
+                    if not bf.done:
+                        sg = dict(sg, to=round(min(bf.last_t, cut), 1)) if sg["from"] < bf.last_t else dict(sg, to=sg["to"] if sg["to"] is not None and sg["to"] <= cut else round(cut, 1))
+                    elif live:
+                        sg = dict(sg, to=cut)
+                    else:
+                        sg = dict(sg, to=None if self.tracker.current is None else cut)
+                out.append(sg)
+            hist = out
+        return sorted(hist + old, key=lambda x: x["from"]) + live
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -300,6 +356,7 @@ class Reader:
         body = self.snapshot()
         reach = self.bf_reach()
         body["bfReach"] = max(reach, self.bf_resume_t) if reach is not None else self.bf_resume_t
+        body["bfVersion"] = BF_VERSION
         with self.lock:
             body["debug"] = {k: v for k, v in self.debug.items() if k not in ("readings", "backfill_readings")} | {
                 "readings": self.debug["readings"][-6:], "backfill_readings": self.debug["backfill_readings"][-8:]}
@@ -328,7 +385,7 @@ class Reader:
         bf = self.backfill
         if bf is None or bf.video != self.tracker.video:
             return None
-        return bf.end_t if bf.done else bf.last_t
+        return bf.end_t if bf.done else bf.last_t  # only the gap-free part: a restart resumes from there
 
     def maybe_restore(self, resp: dict) -> None:
         """After a restart the Worker sends back what it had for this stream; it fills history until the
@@ -340,7 +397,8 @@ class Reader:
         with self.lock:
             if prev and prev.get("video") and prev.get("video") == self.tracker.video and not self.restored:
                 self.restored = [dict(sg) for sg in prev.get("segments") or []]
-                self.bf_resume_t = float(prev.get("bfReach") or 0)
+                same_rules = int(prev.get("bfVersion") or 1) == BF_VERSION
+                self.bf_resume_t = float(prev.get("bfReach") or 0) if same_rules else 0.0  # new rules: rescan
                 log.info("restored %d segments, backfill had reached %.0f s", len(self.restored), self.bf_resume_t)
                 self.dirty = True
         if self.pending_bf:
@@ -394,29 +452,28 @@ class Reader:
 BF_SQ = re.compile(r"/sq/(\d+)/")
 
 
-class Backfill:
-    """Reads what aired before the reader joined, from YouTube's DVR window, faster than real time."""
+BF_VERSION = 2  # bump to rescan history with new detection rules (2: break screen + talk time)
 
-    def __init__(self, reader: Reader, video: str | None, latest: hls.Seg, end_seq: int, start_seq: int = 0):
-        self.r, self.video, self.template, self.dur = reader, video, latest.uri, latest.duration or 5.0
-        self.end_seq, self.seq = end_seq, max(0, start_seq)
-        self.start_t = self.seq * self.dur + reader.cfg.time_offset
-        self.end_t = end_seq * self.dur + reader.cfg.time_offset
-        self.tracker = Tracker(confirm=reader.cfg.confirm, max_speech=reader.cfg.max_speech)
-        self.ps = Pass(self.tracker, reader.cfg.interval)
+
+class Chunk:
+    """One stretch of the history read by one worker thread."""
+
+    def __init__(self, bf: "Backfill", start_seq: int, end_seq: int):
+        r = bf.r
+        self.bf, self.seq, self.end_seq = bf, start_seq, end_seq
+        self.start_t = start_seq * bf.dur + r.cfg.time_offset
+        self.end_t = end_seq * bf.dur + r.cfg.time_offset
+        self.tracker = Tracker(confirm=r.cfg.confirm, max_speech=r.cfg.max_speech)
+        self.ps = Pass(self.tracker, r.cfg.interval)
         self.last_t = self.start_t
-        self.done = self.stop = False
-
-    def url(self, seq: int) -> str:
-        return BF_SQ.sub(f"/sq/{seq}/", self.template, count=1)
+        self.done = False
 
     def run(self) -> None:
-        r = self.r
+        bf, r = self.bf, self.bf.r
         fails = 0
-        started = time.time()
-        while self.seq < self.end_seq and not self.stop:
+        while self.seq < self.end_seq and not bf.stop:
             try:
-                data = hls.get(self.url(self.seq), r.stream.headers if r.stream else None, timeout=30)
+                data = hls.get(bf.url(self.seq), r.stream.headers if r.stream else None, timeout=30)
             except hls.HTTPError as e:
                 if e.code in (403, 404, 410):  # outside the DVR window or a gap: skip ahead
                     fails += 1
@@ -428,27 +485,88 @@ class Backfill:
                 time.sleep(5)
                 continue
             fails = 0
-            t0 = self.seq * self.dur + r.cfg.time_offset
+            t0 = self.seq * bf.dur + r.cfg.time_offset
             try:
-                for t, frame in frames.segment_frames(data, t0, self.ps.sampler):
-                    obs = r.read(t, frame, self.ps)
-                    with r.lock:
-                        if self.tracker.observe(t, obs):
-                            r.dirty = True
-                        self.last_t = t
+                r.run_segment(data, t0, self.ps, self)
             except Exception as e:
                 r.note("backfill_error", repr(e)[:200])
             self.seq += 1
-            done_s = self.seq * self.dur - self.start_t
-            r.debug.update(backfill_stats={"frames": self.ps.n_frames, "ocr": self.ps.n_ocr, "kinds": self.ps.kinds,
-                                           "last_none": self.ps.last_none},
-                           backfill_t=round(self.last_t), backfill_end=round(self.end_t),
-                           backfill_speed=round(done_s / max(1, time.time() - started), 2) if done_s else 0)
-        with r.lock:  # an open speech stays open: merged() continues or cuts it against the live pass
-            self.done = not self.stop
+            self.last_t = max(self.last_t, t0 + bf.dur)
+            bf.report()
+        with r.lock:
+            self.done = not bf.stop
             r.dirty = True
-        r.debug["backfill_done"] = self.done
-        log.info("backfill done: %d segments", len(self.tracker.segments))
+
+
+class Backfill:
+    """Reads what aired before the reader joined, from YouTube's DVR window, faster than real time,
+    split into a few stretches read in parallel."""
+
+    def __init__(self, reader: Reader, video: str | None, latest: hls.Seg, end_seq: int, start_seq: int = 0,
+                 workers: int = 2):
+        self.r, self.video, self.template, self.dur = reader, video, latest.uri, latest.duration or 5.0
+        start_seq = max(0, start_seq)
+        self.start_t = start_seq * self.dur + reader.cfg.time_offset
+        self.end_t = end_seq * self.dur + reader.cfg.time_offset
+        n = max(1, workers if end_seq - start_seq > 240 else 1)  # short stretches: one worker
+        cuts = [start_seq + (end_seq - start_seq) * k // n for k in range(n + 1)]
+        self.chunks = [Chunk(self, a, b) for a, b in zip(cuts, cuts[1:])]
+        self.stop = False
+        self.started = time.time()
+
+    @property
+    def done(self) -> bool:
+        return all(c.done for c in self.chunks)
+
+    @property
+    def last_t(self) -> float:
+        """How far the history is read without gaps from the start."""
+        for c in self.chunks:
+            if not c.done:
+                return c.last_t
+        return self.end_t
+
+    def covered(self) -> list[tuple[float, float]]:
+        return [(c.start_t, c.end_t if c.done else c.last_t) for c in self.chunks]
+
+    def url(self, seq: int) -> str:
+        return BF_SQ.sub(f"/sq/{seq}/", self.template, count=1)
+
+    def json(self) -> list[dict]:
+        """All stretches as one timeline: a speech still open at the end of a stretch runs on until the next
+        stretch's first speaker or break, or as far as reading has got."""
+        out: list[dict] = []
+        for c in self.chunks:
+            segs = c.tracker.json()
+            if out and out[-1]["to"] is None:
+                firsts = [x for x in (segs[0]["from"] if segs else None, c.tracker.first_break) if x is not None]
+                if firsts:
+                    out[-1]["to"] = round(min(firsts), 1)
+                elif not c.done:
+                    out[-1]["to"] = round(c.last_t, 1) if c.last_t > c.start_t else round(c.start_t, 1)
+            out.extend(segs)
+        return out
+
+    def report(self) -> None:
+        r = self.r
+        read = sum(c.last_t - c.start_t for c in self.chunks)
+        ps = [c.ps for c in self.chunks]
+        kinds: dict = {}
+        for p in ps:
+            for k, v in p.kinds.items():
+                kinds[k] = kinds.get(k, 0) + v
+        r.debug.update(backfill_t=round(self.last_t), backfill_end=round(self.end_t),
+                       backfill_read=round(read), backfill_speed=round(read / max(1, time.time() - self.started), 2),
+                       backfill_stats={"frames": sum(p.n_frames for p in ps), "ocr": sum(p.n_ocr for p in ps), "kinds": kinds})
+
+    def run(self) -> None:
+        threads = [threading.Thread(target=c.run, daemon=True) for c in self.chunks]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.r.debug["backfill_done"] = self.done
+        log.info("backfill done: %d segments", len(self.json()))
 
 
 def serve(reader: Reader, port: int) -> None:

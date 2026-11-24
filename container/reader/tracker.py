@@ -16,14 +16,21 @@ from dataclasses import dataclass, field
 from .match import Observation, similar_lines
 
 
+SILENCE_CUT = 5.0  # a pause this long stops counting as talking
+
+
 @dataclass
 class Segment:
     start: float
     end: float | None
     mp: int
+    talk: float = 0.0  # seconds with voice, not counting pauses of SILENCE_CUT or more
+    quiet: float = 0.0  # current run of silence
+    heard: bool = False  # any audio at all for this segment (else talk time is unknown)
 
     def json(self) -> dict:
-        return {"from": round(self.start, 1), "to": None if self.end is None else round(self.end, 1), "mp": self.mp}
+        return {"from": round(self.start, 1), "to": None if self.end is None else round(self.end, 1), "mp": self.mp,
+                "talk": round(self.talk, 1) if self.heard else None}
 
 
 @dataclass
@@ -37,6 +44,9 @@ class Tracker:
     _pending: tuple | None = None
     _pending_first: float = 0.0
     _pending_hits: int = 0
+    _breaks: int = 0
+    first_break: float | None = None  # first confirmed break before anyone spoke (joins stretches of history)
+    _break_t: float = 0.0
 
     @property
     def open(self) -> Segment | None:
@@ -52,9 +62,35 @@ class Tracker:
             return False
         return a[1] == b[1] if a[0] == "mp" else similar_lines(a[1], b[1])
 
+    def audio(self, t: float, dt: float, voiced: bool) -> None:
+        """Count talk time for whoever is speaking: pauses shorter than SILENCE_CUT count, longer ones don't."""
+        cur = self.open
+        if cur is None or t < cur.start:
+            return
+        cur.heard = True
+        if voiced:
+            cur.talk += dt + (cur.quiet if cur.quiet < SILENCE_CUT else 0.0)
+            cur.quiet = 0.0
+        else:
+            cur.quiet += dt
+
     def observe(self, t: float, obs: Observation) -> bool:
         """Feed one reading at stream time t. Returns True when the timeline changed."""
         changed = self.tick(t)
+        if obs.kind == "break":  # the break screen, seen twice in a row: nobody is speaking
+            self._pending, self._pending_hits = None, 0
+            self._breaks += 1
+            if self._breaks == 1:
+                self._break_t = t
+                return changed
+            self.current = None
+            if not self.segments and self.first_break is None:
+                self.first_break = self._break_t
+            if self.open is not None:
+                self.open.end = max(self.open.start, self._break_t)
+                return True
+            return changed
+        self._breaks = 0
         if obs.kind == "none":
             return changed
         ident = ("mp", obs.mp) if obs.kind == "mp" else ("other", obs.line)
@@ -104,7 +140,8 @@ class Tracker:
         if self.segments or not video or self.video not in (None, video):
             return False
         self.video = video
-        self.segments = [Segment(float(s["from"]), None if s.get("to") is None else float(s["to"]), int(s["mp"])) for s in segments]
+        self.segments = [Segment(float(s["from"]), None if s.get("to") is None else float(s["to"]), int(s["mp"]),
+                                 float(s.get("talk") or 0), heard=s.get("talk") is not None) for s in segments]
         if self.open is not None:
             self.current = ("mp", self.open.mp)
         return True

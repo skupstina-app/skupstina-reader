@@ -35,12 +35,15 @@ class Config:
     langs: str
     time_offset: float
     max_speech: float
+    voice_db: float
+    voice_margin: float
     offline_exit: float
     cookies: str | None
     proxy: str | None
     port: int
     # replay mode (testing): read a recording instead of the live stream
     backfill: bool
+    backfill_workers: int
     source_url: str | None
     start: float
     duration: float
@@ -67,11 +70,14 @@ class Config:
             langs=e("TESS_LANGS") or "srp+srp_latn",
             time_offset=_f("TIME_OFFSET", 0.0),
             max_speech=_f("MAX_SPEECH", 1800),
+            voice_db=_f("VOICE_DB", -42),  # until the room's level is known: louder than this (dBFS) is talking
+            voice_margin=_f("VOICE_MARGIN", 10),  # then: this many dB above the room's background level
             offline_exit=_f("OFFLINE_EXIT", 900),
             cookies=cookies,
             proxy=e("YTDLP_PROXY") or None,
             port=int(_f("PORT", 8080)),
             backfill=(e("BACKFILL") or "1") != "0",
+            backfill_workers=int(_f("BACKFILL_WORKERS", 2)),
             source_url=e("SOURCE_URL") or None,
             start=_f("START", 0),
             duration=_f("DURATION", 600),
