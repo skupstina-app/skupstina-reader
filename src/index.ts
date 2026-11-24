@@ -169,20 +169,17 @@ export class Reader extends Container<Env> {
     await this.ctx.storage.put("lastCheck", { at: Date.now(), live });
     const st = await this.getState();
     const running = st.status === "running" || st.status === "healthy";
-    // A deploy doesn't replace a running container: stop it once, and the next tick starts the new image.
+    // A deploy restarts the container right away, usually before the new image has rolled out, so it can
+    // come back on the old image. Restart once more, 3 minutes after a new version shows up.
     const ver = this.env.CF_VERSION_METADATA?.id ?? "";
-    const startedVer = await this.ctx.storage.get<string>("startedVer");
-    if (running && ver && startedVer !== ver) {
-      // wait until the new image has rolled out (a couple of minutes), or the restart picks up the old one
-      const seen = await this.ctx.storage.get<{ ver: string; at: number }>("verSeen");
-      if (!seen || seen.ver !== ver) {
-        await this.ctx.storage.put("verSeen", { ver, at: Date.now() });
-        return "new version, restarting in 3 min";
+    const seen = await this.ctx.storage.get<{ ver: string; at: number; done?: boolean }>("verSeen");
+    if (ver && (!seen || seen.ver !== ver)) await this.ctx.storage.put("verSeen", { ver, at: Date.now() });
+    else if (ver && seen && !seen.done && Date.now() - seen.at > 3 * 60_000) {
+      await this.ctx.storage.put("verSeen", { ...seen, done: true });
+      if (running) {
+        await this.stop();
+        return "restarting on the new image";
       }
-      if (Date.now() - seen.at < 3 * 60_000) return "new version, restarting soon";
-      await this.ctx.storage.put("startedVer", ver);
-      await this.stop();
-      return "restarting for new version";
     }
     if (running) return "running";
     // Unknown (YouTube's page can't be read from the Worker): start the container and let it check
@@ -190,7 +187,6 @@ export class Reader extends Container<Env> {
     const lastStop = (await this.ctx.storage.get<Note>("lastStop"))?.at ?? 0;
     if (live === true || (live === null && Date.now() - lastStop > 5 * 60_000)) {
       await this.ctx.storage.put("lastStart", { at: Date.now(), live });
-      if (ver) await this.ctx.storage.put("startedVer", ver);
       await this.startAndWaitForPorts();
       return "started";
     }
