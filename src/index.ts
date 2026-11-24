@@ -227,7 +227,17 @@ export default {
   async scheduled(ev: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const live = await checkLive(env.YT_CHANNEL);
     const minute = new Date(ev.scheduledTime).getUTCMinutes();
-    const r = await getContainer(env.READER, ID).tick(live, minute);
-    console.log(JSON.stringify({ live, container: r }));
+    const reader = getContainer(env.READER, ID);
+    const r = await reader.tick(live, minute);
+    // One line per minute in Workers Logs: enough to see what the reader is doing without the secret.
+    const s = JSON.parse(await reader.status());
+    const d = s.timeline?.debug ?? {};
+    console.log(JSON.stringify({
+      liveCheck: live, container: r, state: s.state?.status,
+      video: s.timeline?.video ?? null, streamLive: s.timeline?.live ?? null, segments: s.timeline?.segments?.length ?? 0,
+      lastPushAgoS: s.timeline ? Math.round((Date.now() - s.timeline.received) / 1000) : null,
+      status: d.status, error: d.error, pushError: d.push_error, mpsError: d.mps_error, streamT: d.stream_t,
+      last: Array.isArray(d.readings) ? d.readings.slice(-2) : undefined,
+    }));
   },
 } satisfies ExportedHandler<Env>;
