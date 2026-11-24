@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -35,12 +36,25 @@ SAME_IMAGE = 0.01
 MAX_REUSE = 5.0  # seconds a reading may be reused for an unchanged crop
 
 
+class Pass:
+    """State of one pass over the video: live, or the backfill of what aired before we joined."""
+
+    def __init__(self, tracker: Tracker, interval: float):
+        self.tracker = tracker
+        self.sampler = frames.Sampler(interval)
+        self.sig = None
+        self.sig_t = -1e9
+        self.sig_obs = match.Observation("none")
+
+
 class Reader:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.lock = threading.Lock()
         self.tracker = Tracker(confirm=cfg.confirm, max_speech=cfg.max_speech)
-        self.sampler = frames.Sampler(cfg.interval)
+        self.live_pass = Pass(self.tracker, cfg.interval)
+        self.sampler = self.live_pass.sampler
+        self.backfill: "Backfill | None" = None
         self.index: list[match.MP] = []
         self.mps_at = 0.0
         self.stream: hls.Stream | None = None
@@ -52,13 +66,10 @@ class Reader:
         self.dirty = True
         self.pushed_at = 0.0
         self.restore_tried = False
-        self._sig = None
-        self._sig_t = -1e9
-        self._sig_obs = match.Observation("none")
         self.last_frame = self.last_cap = None
         self.last_t_frame = 0.0
         self.snap_at = 0.0
-        self.debug: dict = {"boot": BOOT, "readings": []}
+        self.debug: dict = {"boot": BOOT, "readings": [], "backfill_readings": []}
 
     # ---- inputs -----------------------------------------------------------
     def refresh_mps(self) -> None:
@@ -72,22 +83,25 @@ class Reader:
         except Exception as e:
             self.note("mps_error", repr(e)[:300])
 
-    def read(self, t: float, frame) -> match.Observation:
+    def read(self, t: float, frame, ps: "Pass | None" = None) -> match.Observation:
+        ps = ps or self.live_pass
         cap = caption.capture(frame, self.cfg.region, self.cfg.white)
-        self.last_frame, self.last_cap, self.last_t_frame = frame, cap, t
+        if ps is self.live_pass:
+            self.last_frame, self.last_cap, self.last_t_frame = frame, cap, t
         if cap.ink < MIN_INK:
             obs, lines = match.Observation("none"), []
-        elif caption.signature_distance(self._sig, cap.signature) < SAME_IMAGE and t - self._sig_t < MAX_REUSE:
-            return self._sig_obs
+        elif caption.signature_distance(ps.sig, cap.signature) < SAME_IMAGE and t - ps.sig_t < MAX_REUSE:
+            return ps.sig_obs
         else:
             lines = caption.ocr_lines(cap.image, self.cfg.langs)
-            cur = self.tracker.current
+            cur = ps.tracker.current
             obs = match.classify(lines, self.index, self.cfg.min_confidence, cur[1] if cur and cur[0] == "mp" else None)
-            self._sig, self._sig_t, self._sig_obs = cap.signature, t, obs
-        r = self.debug["readings"]
-        r.append({"t": round(t, 1), "kind": obs.kind, "mp": obs.mp, "line": obs.line,
-                  "ocr": [f"{l.confidence:.0f}% {l.text}" for l in lines][:4]})
-        del r[:-20]
+            ps.sig, ps.sig_t, ps.sig_obs = cap.signature, t, obs
+        if obs.kind != "none" or ps is self.live_pass:
+            r = self.debug["readings" if ps is self.live_pass else "backfill_readings"]
+            r.append({"t": round(t, 1), "kind": obs.kind, "mp": obs.mp, "line": obs.line,
+                      "ocr": [f"{l.confidence:.0f}% {l.text}" for l in lines][:4]})
+            del r[:-20]
         return obs
 
     def feed(self, t: float, frame) -> None:
@@ -126,6 +140,9 @@ class Reader:
                 return OFFLINE_POLL
             with self.lock:
                 if s.video != self.tracker.video:
+                    if self.backfill:
+                        self.backfill.stop = True
+                        self.backfill = None
                     self.tracker.reset(s.video)
                     self.last_seq = self.last_t = None
                     self.restore_tried = False
@@ -149,6 +166,7 @@ class Reader:
             return 2
         if self.last_seq is None or segs[-1].seq < self.last_seq:
             self.last_seq = segs[-1].seq - BACKLOG
+            self.start_backfill(segs[-1], self.last_seq + 1)
         new = [s for s in segs if s.seq > self.last_seq]
         if len(new) > 12:  # fell behind: skip ahead instead of lagging forever
             new = new[-BACKLOG:]
@@ -171,6 +189,34 @@ class Reader:
             return 10
         return 0.5 if new else max(1.0, (segs[-1].duration or 2) / 2)
 
+    def start_backfill(self, latest: hls.Seg, end_seq: int) -> None:
+        if self.backfill is not None or not self.cfg.backfill or end_seq <= 0:
+            return
+        if not BF_SQ.search(latest.uri):
+            self.note("backfill_error", "segment URLs have no /sq/N/: can't rewind")
+            return
+        self.backfill = Backfill(self, self.tracker.video, latest, end_seq)
+        threading.Thread(target=self.backfill.run, daemon=True).start()
+
+    def merged(self) -> list[dict]:
+        """Backfilled history before the live pass, cut where the live pass has its first speaker."""
+        live = self.tracker.json()
+        bf = self.backfill
+        if bf is None or bf.video != self.tracker.video or not bf.tracker.segments:
+            return live
+        cut = live[0]["from"] if live else bf.end_t
+        out = []
+        for sg in bf.tracker.json():
+            if sg["from"] >= cut:
+                break
+            if sg["to"] is None or sg["to"] > cut:
+                # still open where the backfill stopped: runs on into the live pass unless that has a speaker
+                sg = dict(sg, to=cut if (live or bf.done) else round(bf.last_t, 1))
+                if not live and bf.done and self.tracker.current is None:
+                    sg["to"] = None
+            out.append(sg)
+        return out + live
+
     def snapshot(self) -> dict:
         with self.lock:
             return {
@@ -178,7 +224,7 @@ class Reader:
                 "video": self.tracker.video,
                 "live": self.live,
                 "updated": int(time.time() * 1000),
-                "segments": self.tracker.json(),
+                "segments": self.merged(),
             }
 
     def snapshot_jpeg(self) -> bytes | None:
@@ -210,7 +256,8 @@ class Reader:
         self.dirty = False
         body = self.snapshot()
         with self.lock:
-            body["debug"] = {k: v for k, v in self.debug.items() if k != "readings"} | {"readings": self.debug["readings"][-6:]}
+            body["debug"] = {k: v for k, v in self.debug.items() if k not in ("readings", "backfill_readings")} | {
+                "readings": self.debug["readings"][-6:], "backfill_readings": self.debug["backfill_readings"][-8:]}
         if time.time() - self.snap_at > 30:
             try:
                 import base64
@@ -281,6 +328,63 @@ class Reader:
         self.tracker.end(stop)
         return {"video": s.video, "height": s.height, "frames": n, "seconds": round(time.time() - started),
                 "segments": self.tracker.json()}
+
+
+BF_SQ = re.compile(r"/sq/(\d+)/")
+
+
+class Backfill:
+    """Reads what aired before the reader joined, from YouTube's DVR window, faster than real time."""
+
+    def __init__(self, reader: Reader, video: str | None, latest: hls.Seg, end_seq: int):
+        self.r, self.video, self.template, self.dur = reader, video, latest.uri, latest.duration or 5.0
+        self.end_seq, self.seq = end_seq, 0
+        self.end_t = end_seq * self.dur + reader.cfg.time_offset
+        self.tracker = Tracker(confirm=reader.cfg.confirm, max_speech=reader.cfg.max_speech)
+        self.ps = Pass(self.tracker, reader.cfg.interval)
+        self.last_t = 0.0
+        self.done = self.stop = False
+
+    def url(self, seq: int) -> str:
+        return BF_SQ.sub(f"/sq/{seq}/", self.template, count=1)
+
+    def run(self) -> None:
+        r = self.r
+        fails = 0
+        started = time.time()
+        while self.seq < self.end_seq and not self.stop:
+            try:
+                data = hls.get(self.url(self.seq), r.stream.headers if r.stream else None, timeout=30)
+            except hls.HTTPError as e:
+                if e.code in (403, 404, 410):  # outside the DVR window or a gap: skip ahead
+                    fails += 1
+                    self.seq += 60 if fails < 50 else 600
+                    continue
+                time.sleep(5)
+                continue
+            except Exception:
+                time.sleep(5)
+                continue
+            fails = 0
+            t0 = self.seq * self.dur + r.cfg.time_offset
+            try:
+                for t, frame in frames.segment_frames(data, t0, self.ps.sampler):
+                    obs = r.read(t, frame, self.ps)
+                    with r.lock:
+                        if self.tracker.observe(t, obs):
+                            r.dirty = True
+                        self.last_t = t
+            except Exception as e:
+                r.note("backfill_error", repr(e)[:200])
+            self.seq += 1
+            done_s = self.seq * self.dur
+            r.debug.update(backfill_t=round(self.last_t), backfill_end=round(self.end_t),
+                           backfill_speed=round(done_s / max(1, time.time() - started), 2) if done_s else 0)
+        with r.lock:  # an open speech stays open: merged() continues or cuts it against the live pass
+            self.done = not self.stop
+            r.dirty = True
+        r.debug["backfill_done"] = self.done
+        log.info("backfill done: %d segments", len(self.tracker.segments))
 
 
 def serve(reader: Reader, port: int) -> None:

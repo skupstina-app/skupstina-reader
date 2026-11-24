@@ -24,6 +24,7 @@
       "max_instances": 1
     }
   ],
+  "d1_databases": [{ "binding": "DB", "database_name": "skupstina", "database_id": "44a83a33-3c42-4a4d-8dde-919307728955" }],
   "kv_namespaces": [{ "binding": "DEBUG_KV", "id": "2ec4181106164f0d89c9d3310d8296ed" }],
   "durable_objects": { "bindings": [{ "name": "READER", "class_name": "Reader" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Reader"] }],

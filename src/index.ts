@@ -13,7 +13,8 @@ import { Container, getContainer } from "@cloudflare/containers";
 
 export interface Env {
   READER: DurableObjectNamespace<Reader>;
-  DEBUG_KV?: KVNamespace; // latest debug snapshot (frame + caption strip + OCR mask) and readings
+  DEBUG_KV?: KVNamespace;
+  DB?: D1Database; // the site's database: every recognised speech is kept in speech_segments // latest debug snapshot (frame + caption strip + OCR mask) and readings
   READER_SECRET: string;
   PUSH_URL: string;
   YT_CHANNEL: string;
@@ -104,7 +105,43 @@ export class Reader extends Container<Env> {
     }
     await this.ctx.storage.put("tl", next);
     this.renewActivityTimeout();
+    if (next.video) await this.persist(next.video, prev?.video === next.video ? prev.segments : [], next.segments);
     return previous ? { ok: true, previous } : { ok: true };
+  }
+
+  /** History: upsert changed speeches, drop ones the reader no longer reports (same broadcast). */
+  private tableReady = false;
+  async persist(video: string, before: Seg[], after: Seg[]): Promise<void> {
+    const db = this.env.DB;
+    if (!db) return;
+    const key = (s: Seg) => s.from.toFixed(1);
+    const old = new Map(before.map((s) => [key(s), s]));
+    const now = new Map(after.map((s) => [key(s), s]));
+    const changed = after.filter((s) => {
+      const o = old.get(key(s));
+      return !o || o.to !== s.to || o.mp !== s.mp;
+    });
+    const gone = before.filter((s) => !now.has(key(s)));
+    if (!changed.length && !gone.length && this.tableReady) return;
+    try {
+      if (!this.tableReady) {
+        await db.batch([
+          db.prepare("CREATE TABLE IF NOT EXISTS speech_segments(video TEXT NOT NULL, start REAL NOT NULL, end REAL, mp INTEGER NOT NULL, updated_at INTEGER, PRIMARY KEY(video, start))"),
+          db.prepare("CREATE INDEX IF NOT EXISTS speech_segments_mp ON speech_segments(mp)"),
+        ]);
+        this.tableReady = true;
+        // first write for this object: make sure everything we hold is stored
+        changed.splice(0, changed.length, ...after);
+      }
+      const t = Date.now();
+      const stmts = [
+        ...changed.map((s) => db.prepare("INSERT INTO speech_segments(video,start,end,mp,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(video,start) DO UPDATE SET end=excluded.end, mp=excluded.mp, updated_at=excluded.updated_at").bind(video, s.from, s.to, s.mp, t)),
+        ...gone.map((s) => db.prepare("DELETE FROM speech_segments WHERE video=? AND start=?").bind(video, s.from)),
+      ];
+      for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
+    } catch (e) {
+      await this.ctx.storage.put("lastError", { at: Date.now(), error: "persist: " + String(e) });
+    }
   }
 
   async timeline(): Promise<Omit<Timeline, "debug"> | null> {
@@ -252,7 +289,8 @@ export default {
       video: s.timeline?.video ?? null, streamLive: s.timeline?.live ?? null, segments: s.timeline?.segments?.length ?? 0,
       lastPushAgoS: s.timeline ? Math.round((Date.now() - s.timeline.received) / 1000) : null,
       status: d.status, error: d.error, pushError: d.push_error, mpsError: d.mps_error, streamT: d.stream_t,
-      behindS: d.behind_s, speed: d.speed,
+      behindS: d.behind_s, speed: d.speed, backfillT: d.backfill_t, backfillEnd: d.backfill_end, backfillSpeed: d.backfill_speed, backfillError: d.backfill_error,
+      bfLast: Array.isArray(d.backfill_readings) ? d.backfill_readings.slice(-2) : undefined,
       last: Array.isArray(d.readings) ? d.readings.slice(-2) : undefined,
     }));
   },

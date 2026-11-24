@@ -40,6 +40,7 @@ class Config:
     proxy: str | None
     port: int
     # replay mode (testing): read a recording instead of the live stream
+    backfill: bool
     source_url: str | None
     start: float
     duration: float
@@ -70,6 +71,7 @@ class Config:
             cookies=cookies,
             proxy=e("YTDLP_PROXY") or None,
             port=int(_f("PORT", 8080)),
+            backfill=(e("BACKFILL") or "1") != "0",
             source_url=e("SOURCE_URL") or None,
             start=_f("START", 0),
             duration=_f("DURATION", 600),
