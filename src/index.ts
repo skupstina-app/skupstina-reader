@@ -254,12 +254,12 @@ export default {
       } catch {
         return json({ error: "bad json" }, 400);
       }
-      const snap = (body as { snapshot?: { t: number; jpeg: string } }).snapshot;
+      const snap = (body as { snapshot?: { t: number; jpeg: string; which?: string } }).snapshot;
       delete (body as { snapshot?: unknown }).snapshot;
       if (snap && env.DEBUG_KV) {
         const bytes = Uint8Array.from(atob(snap.jpeg), (c) => c.charCodeAt(0));
         ctx.waitUntil(Promise.all([
-          env.DEBUG_KV.put("snapshot.jpg", bytes, { metadata: { t: snap.t, at: Date.now() } }),
+          env.DEBUG_KV.put(snap.which === "backfill" ? "snapshot-backfill.jpg" : "snapshot.jpg", bytes, { metadata: { t: snap.t, at: Date.now() } }),
           env.DEBUG_KV.put("debug.json", JSON.stringify({ at: Date.now(), t: snap.t, video: body.video, debug: body.debug })),
         ]));
       }

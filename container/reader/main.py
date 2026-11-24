@@ -45,6 +45,10 @@ class Pass:
         self.sig = None
         self.sig_t = -1e9
         self.sig_obs = match.Observation("none")
+        self.n_frames = self.n_ocr = 0
+        self.kinds: dict = {}
+        self.last_none: dict | None = None
+        self.snap_at = 0.0
 
 
 class Reader:
@@ -70,6 +74,8 @@ class Reader:
         self.pushed_at = 0.0
         self.restore_tried = False
         self.last_frame = self.last_cap = None
+        self.bf_frame = self.bf_cap = None
+        self.bf_t = 0.0
         self.last_t_frame = 0.0
         self.snap_at = 0.0
         self.debug: dict = {"boot": BOOT, "readings": [], "backfill_readings": []}
@@ -89,17 +95,25 @@ class Reader:
     def read(self, t: float, frame, ps: "Pass | None" = None) -> match.Observation:
         ps = ps or self.live_pass
         cap = caption.capture(frame, self.cfg.region, self.cfg.white)
+        ps.n_frames += 1
         if ps is self.live_pass:
             self.last_frame, self.last_cap, self.last_t_frame = frame, cap, t
+        elif cap.ink >= MIN_INK and time.time() - ps.snap_at > 60:
+            ps.snap_at = time.time()  # a backfill frame with something white in the caption area
+            self.bf_frame, self.bf_cap, self.bf_t = frame, cap, t
         if cap.ink < MIN_INK:
             obs, lines = match.Observation("none"), []
         elif caption.signature_distance(ps.sig, cap.signature) < SAME_IMAGE and t - ps.sig_t < MAX_REUSE:
             return ps.sig_obs
         else:
+            ps.n_ocr += 1
             lines = caption.ocr_lines(cap.image, self.cfg.langs)
             cur = ps.tracker.current
             obs = match.classify(lines, self.index, self.cfg.min_confidence, cur[1] if cur and cur[0] == "mp" else None)
             ps.sig, ps.sig_t, ps.sig_obs = cap.signature, t, obs
+            ps.kinds[obs.kind] = ps.kinds.get(obs.kind, 0) + 1
+            if obs.kind == "none" and lines and ps is not self.live_pass:
+                ps.last_none = {"t": round(t, 1), "ocr": [f"{l.confidence:.0f}% {l.text}" for l in lines][:4]}
         if obs.kind != "none" or ps is self.live_pass:
             r = self.debug["readings" if ps is self.live_pass else "backfill_readings"]
             r.append({"t": round(t, 1), "kind": obs.kind, "mp": obs.mp, "line": obs.line,
@@ -256,12 +270,12 @@ class Reader:
                 "segments": self.merged(),
             }
 
-    def snapshot_jpeg(self) -> bytes | None:
+    def snapshot_jpeg(self, which: str = "live") -> bytes | None:
         """Frame (scaled), caption strip and the mask OCR saw, stacked: for debugging only."""
         import io
         from PIL import Image
 
-        f, cap = self.last_frame, self.last_cap
+        f, cap = (self.last_frame, self.last_cap) if which == "live" else (self.bf_frame, self.bf_cap)
         if f is None or cap is None:
             return None
         W = 960
@@ -292,9 +306,12 @@ class Reader:
         if time.time() - self.snap_at > 30:
             try:
                 import base64
-                jpg = self.snapshot_jpeg()
+                self.snap_n = getattr(self, "snap_n", 0) + 1
+                which = "backfill" if self.snap_n % 2 == 0 and self.bf_frame is not None else "live"
+                jpg = self.snapshot_jpeg(which)
                 if jpg:
-                    body["snapshot"] = {"t": round(self.last_t_frame, 1), "jpeg": base64.b64encode(jpg).decode()}
+                    body["snapshot"] = {"t": round(self.last_t_frame if which == "live" else self.bf_t, 1), "which": which,
+                                        "jpeg": base64.b64encode(jpg).decode()}
                     self.snap_at = time.time()
             except Exception as e:
                 self.note("snapshot_error", repr(e)[:200])
@@ -423,7 +440,9 @@ class Backfill:
                 r.note("backfill_error", repr(e)[:200])
             self.seq += 1
             done_s = self.seq * self.dur - self.start_t
-            r.debug.update(backfill_t=round(self.last_t), backfill_end=round(self.end_t),
+            r.debug.update(backfill_stats={"frames": self.ps.n_frames, "ocr": self.ps.n_ocr, "kinds": self.ps.kinds,
+                                           "last_none": self.ps.last_none},
+                           backfill_t=round(self.last_t), backfill_end=round(self.end_t),
                            backfill_speed=round(done_s / max(1, time.time() - started), 2) if done_s else 0)
         with r.lock:  # an open speech stays open: merged() continues or cuts it against the live pass
             self.done = not self.stop
