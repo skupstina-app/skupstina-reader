@@ -10,7 +10,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [replay, live]
+        options: [replay, live, frames]
         default: replay
       url:
         description: "replay: video URL, or 'latest'"
@@ -21,6 +21,9 @@ on:
       duration:
         description: "replay: seconds to read / live: seconds to watch"
         default: "600"
+
+permissions:
+  contents: write
 
 jobs:
   probe:
@@ -60,3 +63,13 @@ jobs:
           echo "--- logs";     docker logs r 2>&1 | tail -60
           jq -c '{status, error, stream_t, mps}' dbg.json | sed 's/^/::notice title=live::/'
           jq -c '.segments' seg.json | sed 's/^/::notice title=segments::/'
+      - name: Save frames to the probe-frames branch
+        if: inputs.mode == 'frames'
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          mkdir -p out && chmod 777 out
+          docker run --rm -e YT_COOKIES -v "$PWD/out:/out" reader python -m reader.dump "${{ inputs.url }}" "${{ inputs.start }}" "${{ inputs.duration }}" 10 /out
+          cd out && git init -q -b probe-frames && git add . \
+            && git -c user.name=probe -c user.email=probe@users.noreply.github.com commit -qm "frames ${{ inputs.url }} ${{ inputs.start }}" \
+            && git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" probe-frames
