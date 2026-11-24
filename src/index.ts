@@ -212,10 +212,25 @@ export class Reader extends Container<Env> {
       await this.ctx.storage.put("verSeen", { ...seen, done: true });
       if (running) {
         await this.stop();
+        await this.ctx.storage.put("restartNow", true);
         return "restarting on the new image";
       }
     }
     if (running) return "running";
+    // A planned restart (above): start again on the next tick, without the usual waits.
+    if (await this.ctx.storage.get<boolean>("restartNow")) {
+      await this.ctx.storage.delete("restartNow");
+      await this.ctx.storage.put("lastStart", { at: Date.now(), live });
+      await this.startAndWaitForPorts();
+      return "started after restart";
+    }
+    // YouTube's page sometimes says "not live" while the stream is on. If the reader itself saw the stream
+    // live in the last 30 minutes, don't trust that: start it and let it check with yt-dlp (it stops on its
+    // own, and reports live: false, when there really is no stream).
+    if (live === false) {
+      const tl = await this.ctx.storage.get<Timeline>("tl");
+      if (tl?.live && Date.now() - (tl.received ?? 0) < 30 * 60_000) live = null;
+    }
     // Unknown (YouTube's page can't be read from the Worker): start the container and let it check
     // itself with yt-dlp; after it exits for lack of a stream, wait 5 minutes before trying again.
     const lastStop = (await this.ctx.storage.get<Note>("lastStop"))?.at ?? 0;
