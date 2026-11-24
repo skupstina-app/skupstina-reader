@@ -1,0 +1,60 @@
+name: probe reader
+
+# Runs the container image on a GitHub runner against real YouTube video, to check detection
+# without touching production.
+#   replay: read a recording (default: the channel's latest finished stream) and print the timeline
+#   live:   follow the live stream for a few minutes and print what it read
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [replay, live]
+        default: replay
+      url:
+        description: "replay: video URL, or 'latest'"
+        default: latest
+      start:
+        description: "replay: start at (seconds)"
+        default: "3600"
+      duration:
+        description: "replay: seconds to read / live: seconds to watch"
+        default: "600"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --platform linux/amd64 -t reader ./container
+      - name: Tests inside the image
+        run: |
+          docker run --rm -v "$PWD/container/tests:/app/tests:ro" reader sh -c \
+            "apt-get update -q >/dev/null && apt-get install -y -q fonts-dejavu-core >/dev/null && pip install -q pytest && python -m pytest -q tests"
+      - name: Replay a recording
+        if: inputs.mode == 'replay'
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          docker run --rm -e YT_COOKIES -e SOURCE_URL="${{ inputs.url }}" -e START="${{ inputs.start }}" \
+            -e DURATION="${{ inputs.duration }}" reader | tee out.txt
+          tail -1 out.txt | jq -c '{video, height, frames, seconds, n: (.segments|length)}' | sed 's/^/::notice title=replay::/'
+          grep -E '^ +[0-9.]+ – ' out.txt | head -40 | sed 's/^/::notice title=segment::/' || true
+      - name: Watch the live stream
+        if: inputs.mode == 'live'
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          docker run -d --name r -p 8080:8080 -e YT_COOKIES -e OFFLINE_EXIT=99999 reader
+          for i in $(seq 1 $(( ${{ inputs.duration }} / 30 ))); do
+            sleep 30
+            curl -fsS localhost:8080/debug | jq -c '{status, error, stream_t, seq, seg_duration, last: .readings[-1]}' || true
+          done
+          echo "--- segments"; curl -fsS localhost:8080/segments | tee seg.json | jq .
+          echo "--- debug";    curl -fsS localhost:8080/debug | tee dbg.json | jq .
+          echo "--- logs";     docker logs r 2>&1 | tail -60
+          jq -c '{status, error, stream_t, mps}' dbg.json | sed 's/^/::notice title=live::/'
+          jq -c '.segments' seg.json | sed 's/^/::notice title=segments::/'

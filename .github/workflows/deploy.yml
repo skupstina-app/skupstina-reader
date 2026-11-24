@@ -1,0 +1,73 @@
+name: test and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: container/requirements.txt
+      - name: Tesseract with Serbian models
+        run: sudo apt-get update -q && sudo apt-get install -y -q tesseract-ocr tesseract-ocr-srp tesseract-ocr-srp-latn fonts-dejavu-core
+      - run: pip install -r container/requirements.txt pytest
+      - name: Reader tests
+        working-directory: container
+        run: python -m pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Deploy Worker + container image
+        run: npx wrangler deploy
+      - name: Make sure the shared secret exists
+        run: |
+          if npx wrangler secret list --format json | grep -q '"READER_SECRET"'; then
+            echo "READER_SECRET already set"
+          else
+            openssl rand -hex 32 | npx wrangler secret put READER_SECRET
+            echo "READER_SECRET created"
+          fi
+      - name: YouTube cookies (only if the YT_COOKIES repo secret is set)
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          if [ -n "$YT_COOKIES" ]; then printf '%s' "$YT_COOKIES" | npx wrangler secret put YT_COOKIES; else echo "no YT_COOKIES secret, skipping"; fi
+      - name: Smoke test
+        run: |
+          sleep 15
+          body=$(curl -fsS https://skupstina.app/api/live/speakers)
+          echo "GET -> $body"
+          echo "$body" | jq -e '.segments | type == "array"'
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d '{}' https://skupstina.app/api/live/speakers)
+          echo "POST without secret -> $code"; test "$code" = 401
+          echo "::notice title=speakers endpoint::$body"

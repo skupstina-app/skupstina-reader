@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "skupstina-reader",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "account_id": "ddfcc7caa1b596fef3abac83992b6089",
+  "workers_dev": false,
+  // In front of the main "skupstina" Worker (custom domain) for this one path only.
+  "routes": [
+    { "pattern": "skupstina.app/api/live/speakers*", "zone_name": "skupstina.app" },
+    { "pattern": "www.skupstina.app/api/live/speakers*", "zone_name": "skupstina.app" }
+  ],
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "PUSH_URL": "https://skupstina.app/api/live/speakers",
+    "YT_CHANNEL": "UCghngrfQwzJ4aaPZ-UgNIZQ"
+  },
+  "containers": [
+    {
+      "class_name": "Reader",
+      "image": "./container/Dockerfile",
+      "image_build_context": "./container",
+      "instance_type": "standard-1",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": { "bindings": [{ "name": "READER", "class_name": "Reader" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Reader"] }],
+  "observability": { "enabled": true }
+}

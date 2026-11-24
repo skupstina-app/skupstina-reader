@@ -1,0 +1,6 @@
+yt-dlp[default]==2026.11.23
+av==19.0.2
+numpy==2.5.3
+scipy==1.18.1
+pillow==12.3.0
+pytesseract==0.3.13
