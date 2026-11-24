@@ -173,6 +173,13 @@ export class Reader extends Container<Env> {
     const ver = this.env.CF_VERSION_METADATA?.id ?? "";
     const startedVer = await this.ctx.storage.get<string>("startedVer");
     if (running && ver && startedVer !== ver) {
+      // wait until the new image has rolled out (a couple of minutes), or the restart picks up the old one
+      const seen = await this.ctx.storage.get<{ ver: string; at: number }>("verSeen");
+      if (!seen || seen.ver !== ver) {
+        await this.ctx.storage.put("verSeen", { ver, at: Date.now() });
+        return "new version, restarting in 3 min";
+      }
+      if (Date.now() - seen.at < 3 * 60_000) return "new version, restarting soon";
       await this.ctx.storage.put("startedVer", ver);
       await this.stop();
       return "restarting for new version";
