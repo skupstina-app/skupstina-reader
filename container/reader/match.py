@@ -246,6 +246,18 @@ class Observation:
     line: str = ""
 
 
+# Surnames that are also in a parliamentary group's name ("Александар Вучић – Србија ...").
+# For these MPs the line read must have another row under it: the name line sits above the group line,
+# so a name read on the bottom row is the group line with the real speaker's name missed.
+IN_GROUP_NAMES = {"vucic"}
+
+
+def _has_row_below(line: OcrLine, lines: list[OcrLine]) -> bool:
+    h = max(1, line.y1 - line.y0)
+    rows = merge_rows([l for l in lines if l.confidence >= JUNK_CONFIDENCE])
+    return any(r.y0 >= line.y1 - h * 0.3 and len(name_words(r.text)) >= 1 for r in rows)
+
+
 def classify(lines: list[OcrLine], index: list[MP], min_confidence: float = 35, current: int | None = None) -> Observation:
     """One reading of the caption: an MP, another (non-MP) speaker, or nothing usable.
 
@@ -260,6 +272,8 @@ def classify(lines: list[OcrLine], index: list[MP], min_confidence: float = 35, 
         if len(scored) > 1 and scored[0][0] == scored[1][0]:
             return Observation("none")  # two MPs fit equally well: don't guess
         best = scored[0][2]
+        if any(k.split()[-1] in IN_GROUP_NAMES for k in best.keys) and not _has_row_below(line, lines):
+            return Observation("none")  # the group line, read without the name line above it
         # The best name followed by more words is a group line whose dash OCR lost ("Александар Вучић
         # Србија"): it tells us nothing about who is speaking.
         if any(has_words_after_name(line.text, n) for n in best.keys):

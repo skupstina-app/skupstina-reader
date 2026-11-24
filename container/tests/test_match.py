@@ -113,3 +113,12 @@ def test_one_word_cannot_be_both_first_name_and_surname():
     idx = build_index([{"id": 1491, "l": "Marija Maruna", "c": "Марија Маруна"},
                        {"id": 7, "l": "Marina Raguš", "c": "Марина Рагуш"}])
     assert (lambda o: (o.kind, o.mp))(classify([line("Марина Рагуш", 18)], idx, 35)) == ("mp", 7)
+
+
+def test_group_line_alone_is_not_vucic_speaking():
+    # name line missed, only the group line "Александар Вучић" (dash and the rest lost) on the bottom row
+    assert kind([line(V, 60)]) == ("none", None)
+    # the real thing: his name with the group line under it
+    assert kind([line(V, 60), line("Александар Вучић – Србија не сме да стане", 105)]) == ("mp", 30)
+    # another MP above the group line still reads as that MP
+    assert kind([line("Милан Радин", 60), line("Александар Вучић – Србија не сме да стане", 105)]) == ("mp", 1050)
