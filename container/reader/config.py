@@ -64,7 +64,7 @@ class Config:
             max_height=int(_f("MAX_HEIGHT", 720)),
             region=_region(e("REGION", "")),
             white=int(_f("WHITE_THRESHOLD", 225)),
-            interval=_f("INTERVAL", 1.5),
+            interval=_f("INTERVAL", 1.0),
             confirm=int(_f("CONFIRM", 3)),
             min_confidence=_f("MIN_CONFIDENCE", 35),
             langs=e("TESS_LANGS") or "srp+srp_latn",

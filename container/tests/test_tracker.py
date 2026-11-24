@@ -68,3 +68,18 @@ def test_restore_only_same_stream_when_empty():
     t2 = Tracker()
     t2.reset("xyz")
     assert not t2.restore("abc", [{"from": 1, "to": 2, "mp": 5}])
+
+
+def test_stray_other_name_does_not_reset_new_speaker():
+    tr = Tracker()
+    feed(tr, 0, [MP(1)] * 3)
+    feed(tr, 60, [MP(2), MP(7), MP(2), NONE, MP(2)])  # one misread as someone else in the middle
+    assert plain(tr.json()) == [{"from": 0.0, "to": 60.0, "mp": 1}, {"from": 60.0, "to": None, "mp": 2}]
+
+
+def test_old_reads_expire():
+    tr = Tracker()
+    feed(tr, 0, [MP(1)] * 3)
+    feed(tr, 60, [MP(2), MP(2)])
+    feed(tr, 200, [MP(2)])  # minutes later: not the same caption
+    assert plain(tr.json()) == [{"from": 0.0, "to": None, "mp": 1}]

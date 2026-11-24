@@ -1,6 +1,6 @@
 """skupstina-reader: watches the @ParlamentSrbija live stream and reports who is speaking.
 
-Every 1.5 s of stream time it OCRs the caption strip, picks the speaker-name line, matches it
+Every second of stream time it OCRs the caption strip, picks the speaker-name line, matches it
 against the MPs from /api/mps and keeps a timeline [{from, to, mp}] in stream seconds. Each
 change (and a heartbeat) is POSTed to the Worker at PUSH_URL with the shared secret.
 

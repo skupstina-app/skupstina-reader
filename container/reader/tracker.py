@@ -1,8 +1,10 @@
 """Readings -> speaker timeline in stream seconds.
 
 Rules (after Neleceni's state machine):
-- a speaker counts as changed after `confirm` readings of the same new name (MP or not);
-  the new segment is back-dated to the first of those readings;
+- a speaker counts as changed after `confirm` readings of the same new name (MP or not) within
+  `window` seconds; a stray misread of some other name in between no longer throws those readings
+  away (it used to, so a short caption with one bad read was missed and the previous speaker kept
+  the floor); the new segment is back-dated to the first of those readings;
 - readings with no usable name change nothing, because the speech usually goes on after
   the caption fades;
 - a non-MP speaker (minister, guest) closes the current MP segment without opening one;
@@ -36,14 +38,13 @@ class Segment:
 @dataclass
 class Tracker:
     confirm: int = 3
+    window: float = 12.0  # readings of a new name count together only this long after the last one
     max_speech: float = 1800.0
     keep: int = 600
     video: str | None = None
     segments: list[Segment] = field(default_factory=list)
     current: tuple | None = None  # ("mp", id) | ("other", line) | None
-    _pending: tuple | None = None
-    _pending_first: float = 0.0
-    _pending_hits: int = 0
+    _cands: list = field(default_factory=list)  # [ident, first t, hits, last t] for names not yet confirmed
     _breaks: int = 0
     first_break: float | None = None  # first confirmed break before anyone spoke (joins stretches of history)
     _break_t: float = 0.0
@@ -54,7 +55,7 @@ class Tracker:
 
     def reset(self, video: str | None) -> None:
         self.video, self.segments, self.current = video, [], None
-        self._pending, self._pending_hits = None, 0
+        self._cands = []
 
     @staticmethod
     def _same(a: tuple | None, b: tuple | None) -> bool:
@@ -78,7 +79,7 @@ class Tracker:
         """Feed one reading at stream time t. Returns True when the timeline changed."""
         changed = self.tick(t)
         if obs.kind == "break":  # the break screen, seen twice in a row: nobody is speaking
-            self._pending, self._pending_hits = None, 0
+            self._cands = []
             self._breaks += 1
             if self._breaks == 1:
                 self._break_t = t
@@ -95,15 +96,18 @@ class Tracker:
             return changed
         ident = ("mp", obs.mp) if obs.kind == "mp" else ("other", obs.line)
         if self._same(ident, self.current):
-            self._pending, self._pending_hits = None, 0
+            self._cands = []  # the current speaker's caption is still up
             return changed
-        if self._same(ident, self._pending):
-            self._pending_hits += 1
-        else:
-            self._pending, self._pending_first, self._pending_hits = ident, t, 1
-        if self._pending_hits >= self.confirm:
-            self._switch(self._pending_first, ident)
-            self._pending, self._pending_hits = None, 0
+        self._cands = [c for c in self._cands if t - c[3] <= self.window]
+        c = next((c for c in self._cands if self._same(ident, c[0])), None)
+        if c is None:
+            c = [ident, t, 0, t]
+            self._cands.append(c)
+        c[2] += 1
+        c[3] = t
+        if c[2] >= self.confirm:
+            self._switch(c[1], c[0])
+            self._cands = []
             return True
         return changed
 
@@ -126,7 +130,7 @@ class Tracker:
 
     def end(self, t: float) -> bool:
         cur = self.open
-        self.current, self._pending, self._pending_hits = None, None, 0
+        self.current, self._cands = None, []
         if cur is not None:
             cur.end = max(cur.start, t)
             return True

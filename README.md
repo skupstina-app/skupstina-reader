@@ -15,7 +15,7 @@ means still speaking, `mp` is an id from `/api/mps`.
 
 ```
 cron (1/min) ── is @ParlamentSrbija live? ──▶ start container (Cloudflare Containers, 1 instance)
-                                                │ yt-dlp → 720p HLS → PyAV frames every 1.5 s
+                                                │ yt-dlp → 720p HLS → PyAV frames every 1 s
                                                 │ caption strip → white mask → Tesseract (srp+srp_latn)
                                                 │ name line → match 250 MPs → 3 reads = speaker change
 viewers ── GET /api/live/speakers ◀── Worker ◀──┘ POST timeline (Bearer READER_SECRET), on change + every 15 s
@@ -62,7 +62,7 @@ and `tesseract-ocr-srp-latn`).
 |---|---|---|
 | `REGION` | `0,80,90,20` | caption area: x, y, w, h in % of the frame |
 | `WHITE_THRESHOLD` | `225` | caption text brightness |
-| `INTERVAL` | `1.5` | seconds between reads |
+| `INTERVAL` | `1.0` | seconds between reads |
 | `CONFIRM` | `3` | reads needed to change speaker |
 | `TESS_LANGS` | `srp+srp_latn` | |
 | `TIME_OFFSET` | `0` | seconds added to stream time, if muting turns out early/late |
