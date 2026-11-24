@@ -10,7 +10,9 @@
     { "pattern": "skupstina.app/api/live/speakers*", "zone_name": "skupstina.app" },
     { "pattern": "www.skupstina.app/api/live/speakers*", "zone_name": "skupstina.app" },
     { "pattern": "skupstina.app/manifest.webmanifest", "zone_name": "skupstina.app" },
-    { "pattern": "skupstina.app/icons/*", "zone_name": "skupstina.app" }
+    { "pattern": "skupstina.app/icons/*", "zone_name": "skupstina.app" },
+    // home page only (exact match): adds the manifest + apple-touch-icon links to the main site's <head>
+    { "pattern": "skupstina.app/", "zone_name": "skupstina.app" }
   ],
   "rules": [{ "type": "Data", "globs": ["**/*.png"], "fallthrough": true }],
   "triggers": { "crons": ["* * * * *"] },

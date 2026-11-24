@@ -33,11 +33,19 @@ const MANIFEST = {
   background_color: "#f5f5f2",
   theme_color: "#f5f5f2",
   icons: [
-    { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
-    { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
-    { src: "/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+    { src: "/icons/icon-192.png?v=2", sizes: "192x192", type: "image/png" },
+    { src: "/icons/icon-512.png?v=2", sizes: "512x512", type: "image/png" },
+    { src: "/icons/icon-maskable-512.png?v=2", sizes: "512x512", type: "image/png", purpose: "maskable" },
   ],
 };
+
+/* added to the home page's <head>; ?v= busts the week-long icon cache when the logo changes */
+const ICON_V = "2";
+const HEAD_LINKS =
+  `<link rel="manifest" href="/manifest.webmanifest?v=${ICON_V}">` +
+  `<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=${ICON_V}">` +
+  `<meta name="apple-mobile-web-app-title" content="Skupština">` +
+  `<meta name="theme-color" content="#f5f5f2">`;
 
 export interface Env {
   READER: DurableObjectNamespace<Reader>;
@@ -329,6 +337,15 @@ export default {
       const res = json(body, 200, { "cache-control": "public, max-age=2" });
       ctx.waitUntil(cache.put(key, res.clone()));
       return res;
+    }
+
+    // The home page: the main site's HTML, plus the home-screen icon links it doesn't have itself.
+    if (url.pathname === "/") {
+      const res = await fetch(req);
+      if (!(res.headers.get("content-type") ?? "").includes("text/html")) return res;
+      return new HTMLRewriter()
+        .on("head", { element: (el) => { el.append(HEAD_LINKS, { html: true }); } })
+        .transform(res);
     }
 
     // Anything else on this route belongs to the main site.
