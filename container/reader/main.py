@@ -60,6 +60,7 @@ class Pass:
         self.sig_obs = match.Observation("none")
         self.n_frames = self.n_ocr = 0
         self.db: list[float] = []  # recent loudness windows (dBFS), to find the room's background level
+        self.n_audio = 0
         self.threshold = 0.0
         self.kinds: dict = {}
         self.last_none: dict | None = None
@@ -75,6 +76,7 @@ class Reader:
         self.sampler = self.live_pass.sampler
         self.backfill: "Backfill | None" = None
         self.restored: list[dict] = []
+        self.audio_template: str | None = None
         self.pending_bf: tuple | None = None
         self.bf_resume_t = 0.0
         self.index: list[match.MP] = []
@@ -140,9 +142,11 @@ class Reader:
             del r[:-20]
         return obs
 
-    def run_segment(self, data: bytes, t0: float, ps: "Pass", chunk: "Chunk | None" = None) -> None:
-        """Frames and audio of one media segment, in time order, into a pass's tracker."""
-        windows = frames.segment_audio(data, t0)
+    def run_segment(self, data: bytes, t0: float, ps: "Pass", chunk: "Chunk | None" = None, audio: bytes | None = None) -> None:
+        """Frames and audio of one media segment, in time order, into a pass's tracker. `audio` is the matching
+        segment of a separate audio-only playlist, when the video has no sound of its own."""
+        windows = frames.segment_audio(audio if audio is not None else data, t0)
+        ps.n_audio += len(windows)
         for _, _, db in windows:
             ps.db.append(db)
         del ps.db[:-VOICE_HISTORY]
@@ -221,7 +225,7 @@ class Reader:
                 self.live = True
             self.offline_since = None
             self.stream, self.stream_at = s, time.time()
-            self.note("status", f"live {s.video} {s.height}p")
+            self.note("status", f"live {s.video} {s.info}")
 
         try:
             text = hls.get(self.stream.url, self.stream.headers).decode("utf-8", "replace")
@@ -240,17 +244,34 @@ class Reader:
         if len(new) > 12:  # fell behind: skip ahead instead of lagging forever
             new = new[-BACKLOG:]
         started = time.time()
+        audio_by_seq: dict[int, str] = {}
+        if self.stream.audio_url:
+            try:
+                atext = hls.get(self.stream.audio_url, self.stream.headers).decode("utf-8", "replace")
+                asegs, _ = hls.parse_playlist(atext, self.stream.audio_url)
+                audio_by_seq = {a.seq: a.uri for a in asegs}
+                if asegs:
+                    self.audio_template = asegs[-1].uri
+            except Exception as e:
+                self.note("audio_error", repr(e)[:200])
         for s in new:
             data = hls.get(s.uri, self.stream.headers, timeout=30)
+            audio = None
+            if s.seq in audio_by_seq:
+                try:
+                    audio = hls.get(audio_by_seq[s.seq], self.stream.headers, timeout=30)
+                except Exception as e:
+                    self.note("audio_error", repr(e)[:200])
             # YouTube numbers live segments from the start of the broadcast, so seq * duration
             # is the position the embedded player reports with getCurrentTime().
             t0 = s.seq * s.duration + self.cfg.time_offset
-            self.run_segment(data, t0, self.live_pass)
+            self.run_segment(data, t0, self.live_pass, audio=audio)
             self.last_seq = s.seq
             if self.live_pass.db:
                 q = sorted(self.live_pass.db)
                 self.debug["audio_db"] = {**{f"p{p}": round(q[int(p / 100 * (len(q) - 1))], 1) for p in (5, 50, 90)},
                                           "threshold": round(self.live_pass.threshold, 1)}
+            self.debug["audio_windows"] = self.live_pass.n_audio
             self.debug.update(seq=s.seq, seg_duration=s.duration, stream_t=round(t0, 1),
                               behind_s=round((segs[-1].seq - s.seq) * s.duration, 1))
         if new:
@@ -452,7 +473,7 @@ class Reader:
 BF_SQ = re.compile(r"/sq/(\d+)/")
 
 
-BF_VERSION = 2  # bump to rescan history with new detection rules (2: break screen + talk time)
+BF_VERSION = 3  # bump to rescan history with new detection rules (2: break screen + talk time, 3: audio-only playlist)
 
 
 class Chunk:
@@ -486,8 +507,14 @@ class Chunk:
                 continue
             fails = 0
             t0 = self.seq * bf.dur + r.cfg.time_offset
+            audio = None
+            if r.audio_template and BF_SQ.search(r.audio_template):
+                try:
+                    audio = hls.get(BF_SQ.sub(f"/sq/{self.seq}/", r.audio_template, count=1), r.stream.headers if r.stream else None, timeout=30)
+                except Exception:
+                    audio = None
             try:
-                r.run_segment(data, t0, self.ps, self)
+                r.run_segment(data, t0, self.ps, self, audio=audio)
             except Exception as e:
                 r.note("backfill_error", repr(e)[:200])
             self.seq += 1
@@ -557,7 +584,8 @@ class Backfill:
                 kinds[k] = kinds.get(k, 0) + v
         r.debug.update(backfill_t=round(self.last_t), backfill_end=round(self.end_t),
                        backfill_read=round(read), backfill_speed=round(read / max(1, time.time() - self.started), 2),
-                       backfill_stats={"frames": sum(p.n_frames for p in ps), "ocr": sum(p.n_ocr for p in ps), "kinds": kinds})
+                       backfill_stats={"frames": sum(p.n_frames for p in ps), "ocr": sum(p.n_ocr for p in ps), "kinds": kinds,
+                                       "audio_windows": sum(p.n_audio for p in ps)})
 
     def run(self) -> None:
         threads = [threading.Thread(target=c.run, daemon=True) for c in self.chunks]

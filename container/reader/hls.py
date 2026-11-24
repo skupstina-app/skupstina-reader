@@ -22,6 +22,8 @@ class Stream:
     headers: dict
     height: int
     live: bool
+    audio_url: str | None = None  # separate audio-only playlist when the video rendition has no sound
+    info: str = ""
 
 
 @dataclass
@@ -63,11 +65,22 @@ def resolve_live(channel: str, max_height: int, cookiefile: str | None = None, p
         raise
     if not info or not info.get("is_live"):
         return None
-    f = _pick(info.get("formats") or [], max_height, lambda f: str(f.get("protocol", "")).startswith("m3u8"))
+    fmts = info.get("formats") or []
+    hls_ = lambda f: str(f.get("protocol", "")).startswith("m3u8")
+    has_audio = lambda f: f.get("acodec") not in (None, "none")
+    # prefer a rendition with sound in it; otherwise take the video and a separate audio-only playlist
+    f = _pick(fmts, max_height, lambda f: hls_(f) and has_audio(f)) or _pick(fmts, max_height, hls_)
     if f is None:
         raise RuntimeError("live, but no HLS video format offered")
-    log.info("live %s at %sp%s", info["id"], f["height"], f.get("fps") or "")
-    return Stream(info["id"], f["url"], dict(f.get("http_headers") or {}), f["height"], True)
+    audio_url = None
+    if not has_audio(f):
+        auds = [a for a in fmts if hls_(a) and has_audio(a) and a.get("vcodec") in (None, "none")]
+        if auds:
+            a = max(auds, key=lambda a: a.get("abr") or a.get("tbr") or 0)
+            audio_url = a["url"]
+    desc = f"{f.get('format_id')} {f['height']}p{f.get('fps') or ''} v={f.get('vcodec')} a={f.get('acodec')}" + (" +audio-only" if audio_url else "")
+    log.info("live %s: %s", info["id"], desc)
+    return Stream(info["id"], f["url"], dict(f.get("http_headers") or {}), f["height"], True, audio_url, desc)
 
 
 def latest_recording(channel: str, cookiefile: str | None = None, proxy: str | None = None) -> str:
