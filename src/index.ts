@@ -70,6 +70,10 @@ export class Reader extends Container<Env> {
     await this.stop();
   }
 
+  override async onStop(): Promise<void> {
+    await this.ctx.storage.put("lastStop", { at: Date.now() });
+  }
+
   override onError(error: unknown) {
     console.error("container error", error);
     return this.ctx.storage.put("lastError", { at: Date.now(), error: String(error) });
@@ -121,12 +125,14 @@ export class Reader extends Container<Env> {
   }
 
   /** Called by the cron: start the container when the stream is (or may be) live. */
-  async tick(live: boolean | null, minute: number): Promise<string> {
+  async tick(live: boolean | null): Promise<string> {
     await this.ctx.storage.put("lastCheck", { at: Date.now(), live });
     const st = await this.getState();
     if (st.status === "running" || st.status === "healthy") return "running";
-    // Unknown (YouTube page blocked or changed): let the container check itself every 10 minutes.
-    if (live === true || (live === null && minute % 10 === 0)) {
+    // Unknown (YouTube's page can't be read from the Worker): start the container and let it check
+    // itself with yt-dlp; after it exits for lack of a stream, wait 10 minutes before trying again.
+    const lastStop = (await this.ctx.storage.get<Note>("lastStop"))?.at ?? 0;
+    if (live === true || (live === null && Date.now() - lastStop > 10 * 60_000)) {
       await this.ctx.storage.put("lastStart", { at: Date.now(), live });
       await this.startAndWaitForPorts();
       return "started";
@@ -226,14 +232,13 @@ export default {
 
   async scheduled(ev: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const live = await checkLive(env.YT_CHANNEL);
-    const minute = new Date(ev.scheduledTime).getUTCMinutes();
-    const reader = getContainer(env.READER, ID);
-    const r = await reader.tick(live, minute);
+        const reader = getContainer(env.READER, ID);
+    const r = await reader.tick(live);
     // One line per minute in Workers Logs: enough to see what the reader is doing without the secret.
     const s = JSON.parse(await reader.status());
     const d = s.timeline?.debug ?? {};
     console.log(JSON.stringify({
-      liveCheck: live, container: r, state: s.state?.status,
+      liveCheck: String(live), container: r, state: s.state?.status,
       video: s.timeline?.video ?? null, streamLive: s.timeline?.live ?? null, segments: s.timeline?.segments?.length ?? 0,
       lastPushAgoS: s.timeline ? Math.round((Date.now() - s.timeline.received) / 1000) : null,
       status: d.status, error: d.error, pushError: d.push_error, mpsError: d.mps_error, streamT: d.stream_t,
