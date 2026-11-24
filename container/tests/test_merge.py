@@ -12,8 +12,8 @@ def reader(**kw):
     return r
 
 
-def bf_for(r, end_seq=100):
-    b = Backfill(r, "vid", Seg(200, 5.0, "https://x.test/videoplayback/sq/200/file/seg.ts"), end_seq)
+def bf_for(r, end_seq=100, start_seq=0):
+    b = Backfill(r, "vid", Seg(200, 5.0, "https://x.test/videoplayback/sq/200/file/seg.ts"), end_seq, start_seq)
     r.backfill = b
     return b
 
@@ -75,3 +75,18 @@ def test_restored_history_fills_until_backfill_reaches_it():
     assert {"from": 19041.0, "to": 19500.0, "mp": 1190} in got
     assert got[-1] == {"from": 19500.0, "to": None, "mp": 7}
     assert all(sg["from"] != 441.0 or sg["to"] != 19041.0 for sg in got)  # the stale stretched segment is gone
+
+
+def test_resumed_backfill_keeps_history_before_where_it_restarted():
+    r = reader()
+    r.restored = [{"from": 441.0, "to": 900.0, "mp": 1029}, {"from": 900.0, "to": None, "mp": 1190}]
+    b = bf_for(r, end_seq=4000, start_seq=200)  # resumes at 1000 s
+    b.last_t = 1000.0
+    got = r.merged()
+    assert got[0] == {"from": 441.0, "to": 900.0, "mp": 1029}  # kept: before the restart point
+    assert got[1]["mp"] == 1190 and got[1]["from"] == 900.0  # still speaking, the backfill hasn't seen a change
+    feed(b.tracker, 1200, 7)
+    b.last_t = 1300
+    got = r.merged()
+    assert got[1] == {"from": 900.0, "to": 1200.0, "mp": 1190}
+    assert got[2] == {"from": 1200.0, "to": 1300.0, "mp": 7}

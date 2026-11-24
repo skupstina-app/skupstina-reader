@@ -56,6 +56,8 @@ class Reader:
         self.sampler = self.live_pass.sampler
         self.backfill: "Backfill | None" = None
         self.restored: list[dict] = []
+        self.pending_bf: tuple | None = None
+        self.bf_resume_t = 0.0
         self.index: list[match.MP] = []
         self.mps_at = 0.0
         self.stream: hls.Stream | None = None
@@ -194,10 +196,16 @@ class Reader:
     def start_backfill(self, latest: hls.Seg, end_seq: int) -> None:
         if self.backfill is not None or not self.cfg.backfill or end_seq <= 0:
             return
+        if self.cfg.push_url and not self.restore_tried:
+            self.pending_bf = (latest, end_seq)  # started after the first push tells us what's already done
+            return
         if not BF_SQ.search(latest.uri):
             self.note("backfill_error", "segment URLs have no /sq/N/: can't rewind")
             return
-        self.backfill = Backfill(self, self.tracker.video, latest, end_seq)
+        start = int(max(0.0, self.bf_resume_t - self.cfg.time_offset) // (latest.duration or 5.0))
+        self.backfill = Backfill(self, self.tracker.video, latest, end_seq, start)
+        if start:
+            log.info("backfill resumes at %.0f s", start * (latest.duration or 5.0))
         threading.Thread(target=self.backfill.run, daemon=True).start()
 
     def merged(self) -> list[dict]:
@@ -208,17 +216,21 @@ class Reader:
         if bf is not None and bf.video != self.tracker.video:
             bf = None
         live_cut = live[0]["from"] if live else float("inf")
+        bf_from = bf.start_t if bf else 0.0
         bf_reach = (bf.end_t if bf.done else bf.last_t) if bf else -1.0
         old = []
         for sg in self.restored:
-            if sg["from"] < bf_reach or sg["from"] >= live_cut:
+            if bf_from <= sg["from"] < bf_reach or sg["from"] >= live_cut:
                 continue
+            if bf and sg["from"] < bf_from and (sg["to"] is None or sg["to"] > bf_from) and bf.tracker.segments:
+                sg = dict(sg, to=min(bf.tracker.segments[0].start, live_cut))  # runs until the backfill's first speaker
             if sg["to"] is None or sg["to"] > live_cut:
                 sg = dict(sg, to=None if live_cut == float("inf") else live_cut)
             old.append(sg)
         if bf is None or not bf.tracker.segments:
             return old + live
-        cut = min(live_cut, old[0]["from"]) if old else (live[0]["from"] if live else bf.end_t)
+        later_old = [sg for sg in old if sg["from"] >= bf_reach]
+        cut = min(live_cut, later_old[0]["from"]) if later_old else (live[0]["from"] if live else bf.end_t)
         out = []
         for sg in bf.tracker.json():
             if sg["from"] >= cut:
@@ -232,7 +244,7 @@ class Reader:
                 else:
                     sg = dict(sg, to=None if self.tracker.current is None else cut)
             out.append(sg)
-        return out + old + live
+        return sorted(out + old, key=lambda x: x["from"]) + live
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -272,6 +284,8 @@ class Reader:
             return
         self.dirty = False
         body = self.snapshot()
+        reach = self.bf_reach()
+        body["bfReach"] = max(reach, self.bf_resume_t) if reach is not None else self.bf_resume_t
         with self.lock:
             body["debug"] = {k: v for k, v in self.debug.items() if k not in ("readings", "backfill_readings")} | {
                 "readings": self.debug["readings"][-6:], "backfill_readings": self.debug["backfill_readings"][-8:]}
@@ -293,18 +307,29 @@ class Reader:
             self.dirty = True
             self.note("push_error", repr(e)[:300])
 
+    def bf_reach(self) -> float | None:
+        bf = self.backfill
+        if bf is None or bf.video != self.tracker.video:
+            return None
+        return bf.end_t if bf.done else bf.last_t
+
     def maybe_restore(self, resp: dict) -> None:
         """After a restart the Worker sends back what it had for this stream; it fills history until the
         backfill has re-read that stretch."""
         prev = resp.get("previous")
-        if self.restore_tried or not prev:
+        if self.restore_tried:
             return
         self.restore_tried = True
         with self.lock:
-            if prev.get("video") and prev.get("video") == self.tracker.video and not self.restored:
+            if prev and prev.get("video") and prev.get("video") == self.tracker.video and not self.restored:
                 self.restored = [dict(sg) for sg in prev.get("segments") or []]
-                log.info("restored %d segments", len(self.restored))
+                self.bf_resume_t = float(prev.get("bfReach") or 0)
+                log.info("restored %d segments, backfill had reached %.0f s", len(self.restored), self.bf_resume_t)
                 self.dirty = True
+        if self.pending_bf:
+            latest, end_seq = self.pending_bf
+            self.pending_bf = None
+            self.start_backfill(latest, end_seq)
 
     def run(self) -> None:
         while True:
@@ -355,13 +380,14 @@ BF_SQ = re.compile(r"/sq/(\d+)/")
 class Backfill:
     """Reads what aired before the reader joined, from YouTube's DVR window, faster than real time."""
 
-    def __init__(self, reader: Reader, video: str | None, latest: hls.Seg, end_seq: int):
+    def __init__(self, reader: Reader, video: str | None, latest: hls.Seg, end_seq: int, start_seq: int = 0):
         self.r, self.video, self.template, self.dur = reader, video, latest.uri, latest.duration or 5.0
-        self.end_seq, self.seq = end_seq, 0
+        self.end_seq, self.seq = end_seq, max(0, start_seq)
+        self.start_t = self.seq * self.dur + reader.cfg.time_offset
         self.end_t = end_seq * self.dur + reader.cfg.time_offset
         self.tracker = Tracker(confirm=reader.cfg.confirm, max_speech=reader.cfg.max_speech)
         self.ps = Pass(self.tracker, reader.cfg.interval)
-        self.last_t = 0.0
+        self.last_t = self.start_t
         self.done = self.stop = False
 
     def url(self, seq: int) -> str:
@@ -396,7 +422,7 @@ class Backfill:
             except Exception as e:
                 r.note("backfill_error", repr(e)[:200])
             self.seq += 1
-            done_s = self.seq * self.dur
+            done_s = self.seq * self.dur - self.start_t
             r.debug.update(backfill_t=round(self.last_t), backfill_end=round(self.end_t),
                            backfill_speed=round(done_s / max(1, time.time() - started), 2) if done_s else 0)
         with r.lock:  # an open speech stays open: merged() continues or cuts it against the live pass

@@ -42,6 +42,7 @@ type Timeline = {
   updated: number;
   received: number;
   segments: Seg[];
+  bfReach?: number; // stream second the backfill (history before joining) has read up to
   debug?: string; // JSON from the container, kept as text
 };
 type Note = { at: number; live?: boolean | null; error?: string };
@@ -83,7 +84,7 @@ export class Reader extends Container<Env> {
     return this.ctx.storage.put("lastError", { at: Date.now(), error: String(error) });
   }
 
-  async ingest(body: Omit<Timeline, "debug" | "received"> & { debug?: unknown }): Promise<{ ok: true; previous?: { video: string; segments: Seg[] } }> {
+  async ingest(body: Omit<Timeline, "debug" | "received"> & { debug?: unknown }): Promise<{ ok: true; previous?: { video: string; segments: Seg[]; bfReach: number } }> {
     const prev = await this.ctx.storage.get<Timeline>("tl");
     const next: Timeline = {
       boot: String(body.boot ?? ""),
@@ -92,13 +93,14 @@ export class Reader extends Container<Env> {
       updated: Number(body.updated) || Date.now(),
       received: Date.now(),
       segments: sanitize(body.segments),
+      bfReach: Math.max(Number(body.bfReach) || 0, prev && prev.video === body.video ? prev.bfReach ?? 0 : 0),
       debug: body.debug === undefined ? undefined : JSON.stringify(body.debug).slice(0, 20_000),
     };
     // A restarted container (new boot id) on the same stream gets the old timeline back.
-    let previous: { video: string; segments: Seg[] } | undefined;
-    if (prev && prev.boot !== next.boot && prev.video && prev.video === next.video && prev.segments.length && !next.segments.length) {
-      previous = { video: prev.video, segments: prev.segments };
-      next.segments = prev.segments;
+    let previous: { video: string; segments: Seg[]; bfReach: number } | undefined;
+    if (prev && prev.boot !== next.boot && prev.video && prev.video === next.video && prev.segments.length) {
+      previous = { video: prev.video, segments: prev.segments, bfReach: prev.bfReach ?? 0 };
+      if (!next.segments.length) next.segments = prev.segments;
     }
     // Stream ended without a new one yet: keep the last stream's timeline for late viewers.
     if (!next.video && prev?.video) {
