@@ -172,11 +172,11 @@ export class Reader extends Container<Env> {
     const st = await this.getState();
     const running = st.status === "running" || st.status === "healthy";
     // A deploy restarts the container right away, usually before the new image has rolled out, so it can
-    // come back on the old image. Restart once more, 3 minutes after a new version shows up.
+    // come back on the old image (the image rollout starts ~2.5 min after the Worker deploy and takes ~1 min). Restart once more, 7 minutes after a new version shows up.
     const ver = this.env.CF_VERSION_METADATA?.id ?? "";
     const seen = await this.ctx.storage.get<{ ver: string; at: number; done?: boolean }>("verSeen");
     if (ver && (!seen || seen.ver !== ver)) await this.ctx.storage.put("verSeen", { ver, at: Date.now() });
-    else if (ver && seen && !seen.done && Date.now() - seen.at > 3 * 60_000) {
+    else if (ver && seen && !seen.done && Date.now() - seen.at > 7 * 60_000) {
       await this.ctx.storage.put("verSeen", { ...seen, done: true });
       if (running) {
         await this.stop();
