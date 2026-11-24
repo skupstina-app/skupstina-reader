@@ -51,3 +51,12 @@ def test_open_speech_runs_on_while_live_has_nobody_yet():
     assert r.merged() == [{"from": 450.0, "to": 499.0, "mp": 2}]  # still backfilling: up to where it read
     b.done = True
     assert r.merged() == [{"from": 450.0, "to": None, "mp": 2}]  # done, nobody new live: still speaking
+
+
+def test_unfinished_backfill_stops_at_what_it_has_read():
+    r = reader()
+    b = bf_for(r)
+    feed(b.tracker, 100, 1)
+    b.last_t = 160
+    feed(r.tracker, 520, 3)
+    assert r.merged()[0] == {"from": 100.0, "to": 160.0, "mp": 1}

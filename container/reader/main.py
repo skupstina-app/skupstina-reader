@@ -211,9 +211,12 @@ class Reader:
                 break
             if sg["to"] is None or sg["to"] > cut:
                 # still open where the backfill stopped: runs on into the live pass unless that has a speaker
-                sg = dict(sg, to=cut if (live or bf.done) else round(bf.last_t, 1))
-                if not live and bf.done and self.tracker.current is None:
-                    sg["to"] = None
+                if not bf.done:
+                    sg = dict(sg, to=round(min(bf.last_t, cut), 1))  # only as far as the backfill has read
+                elif live:
+                    sg = dict(sg, to=cut)
+                else:
+                    sg = dict(sg, to=None if self.tracker.current is None else cut)
             out.append(sg)
         return out + live
 
