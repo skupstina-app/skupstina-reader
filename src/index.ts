@@ -13,8 +13,9 @@ import { Container, getContainer } from "@cloudflare/containers";
 
 export interface Env {
   READER: DurableObjectNamespace<Reader>;
-  DEBUG_KV?: KVNamespace;
-  DB?: D1Database; // the site's database: every recognised speech is kept in speech_segments // latest debug snapshot (frame + caption strip + OCR mask) and readings
+  DEBUG_KV?: KVNamespace; // latest debug snapshot (frame + caption strip + OCR mask) and readings
+  DB?: D1Database; // the site's database: every recognised speech is kept in speech_segments(video, start_s, end_s, mp)
+  CF_VERSION_METADATA?: { id: string }; // restart the container once after a deploy
   READER_SECRET: string;
   PUSH_URL: string;
   YT_CHANNEL: string;
@@ -73,7 +74,8 @@ export class Reader extends Container<Env> {
   }
 
   override async onStop(): Promise<void> {
-    await this.ctx.storage.put("lastStop", { at: Date.now() });
+    const tl = await this.ctx.storage.get<Timeline>("tl");
+    if (!tl?.live) await this.ctx.storage.put("lastStop", { at: Date.now() }); // exited because nothing was live
   }
 
   override onError(error: unknown) {
@@ -126,7 +128,7 @@ export class Reader extends Container<Env> {
     try {
       if (!this.tableReady) {
         await db.batch([
-          db.prepare("CREATE TABLE IF NOT EXISTS speech_segments(video TEXT NOT NULL, start REAL NOT NULL, end REAL, mp INTEGER NOT NULL, updated_at INTEGER, PRIMARY KEY(video, start))"),
+          db.prepare("CREATE TABLE IF NOT EXISTS speech_segments(video TEXT NOT NULL, start_s REAL NOT NULL, end_s REAL, mp INTEGER NOT NULL, updated_at INTEGER, PRIMARY KEY(video, start_s))"),
           db.prepare("CREATE INDEX IF NOT EXISTS speech_segments_mp ON speech_segments(mp)"),
         ]);
         this.tableReady = true;
@@ -135,8 +137,8 @@ export class Reader extends Container<Env> {
       }
       const t = Date.now();
       const stmts = [
-        ...changed.map((s) => db.prepare("INSERT INTO speech_segments(video,start,end,mp,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(video,start) DO UPDATE SET end=excluded.end, mp=excluded.mp, updated_at=excluded.updated_at").bind(video, s.from, s.to, s.mp, t)),
-        ...gone.map((s) => db.prepare("DELETE FROM speech_segments WHERE video=? AND start=?").bind(video, s.from)),
+        ...changed.map((s) => db.prepare("INSERT INTO speech_segments(video,start_s,end_s,mp,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(video,start_s) DO UPDATE SET end_s=excluded.end_s, mp=excluded.mp, updated_at=excluded.updated_at").bind(video, s.from, s.to, s.mp, t)),
+        ...gone.map((s) => db.prepare("DELETE FROM speech_segments WHERE video=? AND start_s=?").bind(video, s.from)),
       ];
       for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
     } catch (e) {
@@ -166,12 +168,24 @@ export class Reader extends Container<Env> {
   async tick(live: boolean | null): Promise<string> {
     await this.ctx.storage.put("lastCheck", { at: Date.now(), live });
     const st = await this.getState();
-    if (st.status === "running" || st.status === "healthy") return "running";
+    const running = st.status === "running" || st.status === "healthy";
+    // A deploy doesn't replace a running container: stop it once, and the next tick starts the new image.
+    const ver = this.env.CF_VERSION_METADATA?.id ?? "";
+    const startedVer = await this.ctx.storage.get<string>("startedVer");
+    if (running && ver && startedVer !== ver) {
+      await this.ctx.storage.put("startedVer", ver);
+      if (startedVer !== undefined) {
+        await this.stop();
+        return "restarting for new version";
+      }
+    }
+    if (running) return "running";
     // Unknown (YouTube's page can't be read from the Worker): start the container and let it check
     // itself with yt-dlp; after it exits for lack of a stream, wait 5 minutes before trying again.
     const lastStop = (await this.ctx.storage.get<Note>("lastStop"))?.at ?? 0;
     if (live === true || (live === null && Date.now() - lastStop > 5 * 60_000)) {
       await this.ctx.storage.put("lastStart", { at: Date.now(), live });
+      if (ver) await this.ctx.storage.put("startedVer", ver);
       await this.startAndWaitForPorts();
       return "started";
     }
