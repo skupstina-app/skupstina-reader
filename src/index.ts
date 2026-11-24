@@ -351,6 +351,11 @@ export default {
   },
 
   async scheduled(ev: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Sessions run in the daytime: from 1 to 8 a.m. Belgrade time only check every 10 minutes (a running reader
+    // keeps going on its own; this only decides when to start one).
+    const bg = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Belgrade", hour: "numeric", minute: "numeric", hourCycle: "h23" }).formatToParts(new Date(ev.scheduledTime));
+    const h = +(bg.find((p) => p.type === "hour")?.value ?? 12), mi = +(bg.find((p) => p.type === "minute")?.value ?? 0);
+    if (h >= 1 && h < 8 && mi % 10 !== 0) return;
     const live = await checkLive(env.YT_CHANNEL);
         const reader = getContainer(env.READER, ID);
     const r = await reader.tick(live);
