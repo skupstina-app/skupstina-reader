@@ -10,6 +10,7 @@ Replay mode (SOURCE_URL set): reads a recording instead, prints the timeline and
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -71,7 +72,7 @@ class Reader:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.lock = threading.Lock()
-        self.tracker = Tracker(confirm=cfg.confirm, max_speech=cfg.max_speech)
+        self.tracker = Tracker(confirm=cfg.confirm, max_speech=cfg.max_speech, end_silent=cfg.end_silent, end_quiet=cfg.end_quiet)
         self.live_pass = Pass(self.tracker, cfg.interval)
         self.sampler = self.live_pass.sampler
         self.backfill: "Backfill | None" = None
@@ -125,7 +126,7 @@ class Reader:
         if cap.ink < MIN_INK:
             obs, lines = match.Observation("none"), []
         elif caption.signature_distance(ps.sig, cap.signature) < SAME_IMAGE and t - ps.sig_t < MAX_REUSE:
-            return ps.sig_obs
+            return self.with_timer(frame, ps, ps.sig_obs)
         else:
             ps.n_ocr += 1
             lines = caption.ocr_lines(cap.image, self.cfg.langs)
@@ -135,12 +136,23 @@ class Reader:
             ps.kinds[obs.kind] = ps.kinds.get(obs.kind, 0) + 1
             if obs.kind == "none" and lines and ps is not self.live_pass:
                 ps.last_none = {"t": round(t, 1), "ocr": [f"{l.confidence:.0f}% {l.text}" for l in lines][:4]}
+        obs = self.with_timer(frame, ps, obs)
         if obs.kind != "none" or ps is self.live_pass:
             r = self.debug["readings" if ps is self.live_pass else "backfill_readings"]
-            r.append({"t": round(t, 1), "kind": obs.kind, "mp": obs.mp, "line": obs.line,
+            r.append({"t": round(t, 1), "kind": obs.kind, "mp": obs.mp, "line": obs.line, "timer": obs.elapsed,
                       "ocr": [f"{l.confidence:.0f}% {l.text}" for l in lines][:4]})
             del r[:-20]
         return obs
+
+    def with_timer(self, frame, ps: "Pass", obs: match.Observation) -> match.Observation:
+        """An MP's name is on screen: also read the speech timer, while it can still move their start."""
+        if obs.kind != "mp" or not ps.tracker.wants_timer(obs.mp):
+            return obs
+        try:
+            elapsed = caption.read_timer(frame, self.cfg.white)
+        except Exception:
+            elapsed = None
+        return dataclasses.replace(obs, elapsed=elapsed) if elapsed is not None else obs
 
     def run_segment(self, data: bytes, t0: float, ps: "Pass", chunk: "Chunk | None" = None, audio: bytes | None = None) -> None:
         """Frames and audio of one media segment, in time order, into a pass's tracker. `audio` is the matching
@@ -159,7 +171,8 @@ class Reader:
             with self.lock:
                 while i < len(windows) and windows[i][0] < limit:
                     w0, dt, db = windows[i]
-                    ps.tracker.audio(w0, dt, db > threshold)
+                    if ps.tracker.audio(w0, dt, db > threshold, db < self.cfg.silent_db):
+                        self.dirty = True
                     i += 1
 
         for t, frame in frames.segment_frames(data, t0, ps.sampler):
@@ -484,7 +497,7 @@ class Chunk:
         self.bf, self.seq, self.end_seq = bf, start_seq, end_seq
         self.start_t = start_seq * bf.dur + r.cfg.time_offset
         self.end_t = end_seq * bf.dur + r.cfg.time_offset
-        self.tracker = Tracker(confirm=r.cfg.confirm, max_speech=r.cfg.max_speech)
+        self.tracker = Tracker(confirm=r.cfg.confirm, max_speech=r.cfg.max_speech, end_silent=r.cfg.end_silent, end_quiet=r.cfg.end_quiet)
         self.ps = Pass(self.tracker, r.cfg.interval)
         self.last_t = self.start_t
         self.done = False

@@ -37,6 +37,9 @@ class Config:
     max_speech: float
     voice_db: float
     voice_margin: float
+    silent_db: float
+    end_silent: float
+    end_quiet: float
     offline_exit: float
     cookies: str | None
     proxy: str | None
@@ -71,7 +74,10 @@ class Config:
             time_offset=_f("TIME_OFFSET", 0.0),
             max_speech=_f("MAX_SPEECH", 1800),
             voice_db=_f("VOICE_DB", -42),  # until the room's level is known: louder than this (dBFS) is talking
-            voice_margin=_f("VOICE_MARGIN", 10),  # then: this many dB above the room's background level
+            voice_margin=_f("VOICE_MARGIN", 10),
+            silent_db=_f("SILENT_DB", -70),  # quieter than this (dBFS): the microphone is cut, not just a pause
+            end_silent=_f("END_SILENT", 0.5),  # seconds of cut microphone that end a speech
+            end_quiet=_f("END_QUIET", 5),  # seconds with no voice (room noise only) that end a speech  # then: this many dB above the room's background level
             offline_exit=_f("OFFLINE_EXIT", 900),
             cookies=cookies,
             proxy=e("YTDLP_PROXY") or None,

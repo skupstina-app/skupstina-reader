@@ -122,3 +122,14 @@ def test_group_line_alone_is_not_vucic_speaking():
     assert kind([line(V, 60), line("Александар Вучић – Србија не сме да стане", 105)]) == ("mp", 30)
     # another MP above the group line still reads as that MP
     assert kind([line("Милан Радин", 60), line("Александар Вучић – Србија не сме да стане", 105)]) == ("mp", 1050)
+
+
+def test_speech_timer_is_read_from_a_real_frame():
+    from pathlib import Path
+    from PIL import Image
+    from reader.caption import parse_timer, read_timer
+    frames = Path(__file__).parent / "frames"
+    assert read_timer(Image.open(frames / "timer.jpg"), 225) == 23  # "0:23", Boris Bajić on screen
+    assert read_timer(Image.open(frames / "speaker.jpg"), 225) is None
+    assert read_timer(Image.open(frames / "break.jpg"), 225) is None
+    assert parse_timer("12:05") == 725 and parse_timer("1:02:03") == 3723 and parse_timer("0:7") is None

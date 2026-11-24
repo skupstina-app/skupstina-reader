@@ -14,8 +14,8 @@ from reader.tracker import Tracker
 MP = Observation("mp", 7, "x")
 
 
-def opened(t=0.0):
-    tr = Tracker()
+def opened(t=0.0, **kw):
+    tr = Tracker(**kw)
     for i in range(3):
         tr.observe(t + i * 1.5, MP)
     return tr
@@ -28,13 +28,20 @@ def audio(tr, t, secs, voiced):
 
 
 def test_short_pauses_count_long_ones_dont():
-    tr = opened()
+    tr = opened(end_quiet=1e9)  # quiet-ends-the-speech switched off for this one
     t = audio(tr, 3, 20, True)      # 20 s talking
     t = audio(tr, t, 3, False)      # 3 s pause: still talking
     t = audio(tr, t, 10, True)      # 10 s talking
     t = audio(tr, t, 60, False)     # a minute of silence: not talking
     t = audio(tr, t, 5, True)       # 5 s more
     assert tr.json()[0]["talk"] == 38.0
+
+
+def test_long_silence_ends_the_speech():
+    tr = opened()
+    t = audio(tr, 3, 20, True)
+    audio(tr, t, 60, False)
+    assert tr.json()[0]["to"] == 23.0 and tr.json()[0]["talk"] == 20.0
 
 
 def test_no_audio_means_unknown_not_zero():

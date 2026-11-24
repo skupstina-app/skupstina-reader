@@ -130,3 +130,56 @@ def ocr_lines(img: Image.Image, langs: str) -> list[OcrLine]:
             max(d["left"][i] + d["width"][i] for i in idx), max(d["top"][i] + d["height"][i] for i in idx),
         ))
     return lines
+
+
+# ---- the speech timer ------------------------------------------------------
+# When an MP is called, the Assembly's feed shows how long they have been speaking ("0:23", white with a
+# dark outline, like the name caption) at the top right. Read it only when a name was read in the same frame.
+
+TIMER_REGION = (66.0, 6.0, 26.0, 22.0)  # x, y, w, h in % of the frame
+_TIMER = __import__("re").compile(r"^(?:(\d):)?(\d{1,2}):([0-5]\d)$")
+
+
+def parse_timer(text: str) -> int | None:
+    """'0:23' -> 23, '12:05' -> 725, '1:02:03' -> 3723; anything else -> None."""
+    m = _TIMER.match(text.strip().replace(" ", "").replace(".", ":").replace(";", ":"))
+    if not m:
+        return None
+    h, mm, ss = int(m.group(1) or 0), int(m.group(2)), int(m.group(3))
+    return h * 3600 + mm * 60 + ss
+
+
+def read_timer(frame: Image.Image, white: int, region: tuple[float, float, float, float] = TIMER_REGION) -> int | None:
+    """Seconds shown by the speech timer, or None if there is no clear timer in the corner. Tries a stricter
+    white threshold too, for bright desks or walls behind the digits."""
+    for wt in dict.fromkeys((white, max(white, 235), 245)):
+        v = _read_timer(frame, wt, region)
+        if v is not None:
+            return v
+    return None
+
+
+def _read_timer(frame: Image.Image, white: int, region: tuple[float, float, float, float]) -> int | None:
+    import pytesseract
+
+    W, H = frame.size
+    x, y, w, h = region
+    sx, sy = round(x / 100 * W), round(y / 100 * H)
+    sw, sh = max(1, round(w / 100 * W)), max(1, round(h / 100 * H))
+    crop = frame.convert("RGB").crop((sx, sy, sx + sw, sy + sh))
+    scale = min(3.0, max(1.0, TARGET_HEIGHT / sh))
+    if scale != 1:
+        crop = crop.resize((round(sw * scale), round(sh * scale)), Image.BICUBIC)
+    mask, ink, _ = binarize(np.asarray(crop), white)
+    if ink < 0.003 * mask.size:
+        return None
+    ys, xs = np.nonzero(mask)
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    if (y1 - y0) < 0.08 * mask.shape[0] or (x1 - x0) < 1.2 * (y1 - y0):  # digits in a row, not a blob
+        return None
+    m = mask[y0:y1, x0:x1]
+    out = np.full((m.shape[0] + 2 * PAD, m.shape[1] + 2 * PAD), 255, dtype=np.uint8)
+    out[PAD:-PAD, PAD:-PAD][m] = 0
+    text = pytesseract.image_to_string(Image.fromarray(out, "L"),
+                                       config="--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789:")
+    return parse_timer(text)

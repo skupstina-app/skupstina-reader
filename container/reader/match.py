@@ -244,6 +244,7 @@ class Observation:
     kind: str  # "none" | "mp" | "other"
     mp: int | None = None
     line: str = ""
+    elapsed: int | None = None  # the speech timer in the same frame (seconds), when it was read
 
 
 # Surnames that are also in a parliamentary group's name ("Александар Вучић – Србија ...").
