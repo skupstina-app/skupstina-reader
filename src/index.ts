@@ -174,10 +174,8 @@ export class Reader extends Container<Env> {
     const startedVer = await this.ctx.storage.get<string>("startedVer");
     if (running && ver && startedVer !== ver) {
       await this.ctx.storage.put("startedVer", ver);
-      if (startedVer !== undefined) {
-        await this.stop();
-        return "restarting for new version";
-      }
+      await this.stop();
+      return "restarting for new version";
     }
     if (running) return "running";
     // Unknown (YouTube's page can't be read from the Worker): start the container and let it check
