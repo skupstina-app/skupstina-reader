@@ -3,6 +3,7 @@
 from reader.match import OcrLine, build_index, classify, line_matches_name, normalize, pick_speaker_line, similar_lines
 
 MPS = build_index([
+    {"id": 1050, "l": "Milan Radin", "c": "Милан Радин"},
     {"id": 30, "l": "Aleksandar Vučić", "c": "Александар Вучић"},
     {"id": 1029, "l": "Milenko Jovanov", "c": "Миленко Јованов"},
     {"id": 1190, "l": "Ana Brnabić", "c": "Ана Брнабић"},
@@ -88,3 +89,10 @@ def test_other_speakers():
 def test_similar_lines():
     assert similar_lines("Александар Вучић", "Александар Вучи")
     assert not similar_lines("Александар Вучић", "Ана Брнабић")
+
+
+def test_garbled_current_speaker_is_not_someone_else():
+    # live 24 Nov 2026: "Милан Рајан" read three times split Radin's speech in two
+    assert classify([line("Милан Рајан", 60, 70)], MPS, 35, current=1050).kind == "none"
+    assert classify([line("Милан Рајан", 60, 70)], MPS, 35).kind == "other"  # without context it's just a name
+    assert classify([line("Милош Вучевић", 60, 80)], MPS, 35, current=1050).kind == "other"  # a real change still counts

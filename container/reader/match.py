@@ -251,7 +251,8 @@ def classify(lines: list[OcrLine], index: list[MP], min_confidence: float = 35, 
         return Observation("none")  # two MPs fit equally well: don't guess
     # A garbled reading of the current speaker's name ("Хиоса ћр ву Вучић") must not count as
     # someone else, or it could end their segment while they are still speaking.
-    if current is not None and any(mentions_surname(line.text, k) for mp in index if mp.id == current for k in mp.keys):
+    if current is not None and any(mentions_surname(line.text, k) or similar_lines(line.text, k)
+                                   for mp in index if mp.id == current for k in mp.keys):
         return Observation("none")
     # A clean, name-shaped line that is no MP: a minister, a guest, the President...
     if line.confidence >= min_confidence and len(capitalised_words(line.text)) >= 2 and not is_group_line(line.text):
