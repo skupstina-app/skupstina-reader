@@ -1,7 +1,7 @@
 /**
  * skupstina-reader Worker
  *
- *   GET  /api/live/speakers         -> {segments:[{from,to,mp}], video, live, updated}  (public, 2 s edge cache)
+ *   GET  /api/live/speakers         -> {segments:[{from,to,mp}], video, live, updated, sitting}  (public, 2 s edge cache)
  *   POST /api/live/speakers         <- timeline pushed by the container (Bearer READER_SECRET)
  *   GET  /api/live/speakers/debug   -> container state + last readings (Bearer or ?key=READER_SECRET)
  *
@@ -69,6 +69,7 @@ type Timeline = {
   live: boolean;
   updated: number;
   received: number;
+  sitting?: number | null; // last push while the stream was live (ms): the day of the sitting this timeline is about
   segments: Seg[];
   bfReach?: number; // stream second the backfill (history before joining) has read up to
   bfVersion?: number; // detection rules the history was read with; a new version rescans
@@ -138,6 +139,8 @@ export class Reader extends Container<Env> {
       next.video = prev.video;
       next.segments = prev.segments.map((s) => (s.to == null ? { ...s, to: s.from } : s));
     }
+    // `updated` is refreshed on every push, also long after the sitting ended; `sitting` moves only while live.
+    next.sitting = next.live ? next.received : prev && prev.video && prev.video === next.video ? prev.sitting ?? null : null;
     await this.ctx.storage.put("tl", next);
     this.renewActivityTimeout();
     if (next.video) await this.persist(next.video, prev?.video === next.video ? prev.segments : [], next.segments);
@@ -340,6 +343,7 @@ export default {
         video: tl?.video ?? null,
         live: fresh && !!tl?.live,
         updated: tl?.updated ?? null,
+        sitting: tl?.sitting ?? null,
       };
       const res = json(body, 200, { "cache-control": "public, max-age=2" });
       ctx.waitUntil(cache.put(key, res.clone()));
